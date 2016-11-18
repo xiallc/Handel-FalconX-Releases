@@ -215,6 +215,7 @@ PSL_STATIC int psl__SyncPixelAdvanceMode(Module *module, Detector *detector);
 PSL_STATIC int psl__SetHistogramMode(Module *module, Detector *detector,
                                      const char *mode);
 PSL_STATIC int psl__SyncNumberMCAChannels(Module *module, Detector *detector);
+PSL_STATIC int psl__SyncGateCollectionMode(Module *module, Detector *detector);
 
 /* Acquisition value handler */
 #define ACQ_HANDLER_DECL(_n) \
@@ -407,6 +408,7 @@ ACQ_HANDLER_DECL(min_pulse_pair_separation);
  *   - #XIA_FILTER_LOW_RATE
  *   - #XIA_FILTER_MID_RATE
  *   - #XIA_FILTER_HIGH_RATE
+ *   - #XIA_FILTER_MAX_THROUGHPUT
  * @endpsl
  */
 ACQ_HANDLER_DECL(detection_filter);
@@ -598,11 +600,26 @@ ACQ_HANDLER_DECL(pixel_advance_mode);
  * acquisition value determines which logic transition stops data
  * acquisition and clears the spectrum for the next pixel.
  *
- * - #XIA_GATE_COLLECT_HI
- * - #XIA_GATE_COLLECT_LO
- * - #XIA_GATE_COLLECT_BOTH
+ * - #XIA_GATE_COLLECT_HI: acquire data while the GATE signal is high
+ *   and trigger pixel advance on the high-to-low transition. If @ref
+ *   gate_ignore is set to 1.0, continue collecting data during the
+ *   transition period.
+ *
+ * - #XIA_GATE_COLLECT_LO: acquire data while the GATE signal is low
+ *   and trigger pixel advance on the low-to-high transition. If @ref
+ *   gate_ignore is set to 1.0, continue collecting data during the
+ *   transition period.
  */
 ACQ_HANDLER_DECL(input_logic_polarity);
+
+/**
+ * @psl{gate_ignore}
+ * Determines if data acquisition should continue or be halted during
+ * pixel advance while GATE is asserted. Set to 1.0 to keep data
+ * acquisition active during the transition. Default: 0.0 (ignore data
+ * during the transition).
+ */
+ACQ_HANDLER_DECL(gate_ignore);
 
 /**
  * @psl{sync_count}
@@ -669,6 +686,7 @@ static const AcquisitionValue DEFAULT_ACQ_VALUES[] = {
     ACQ_DEFAULT(num_map_pixels,              acqInt,       0, PSL_ACQ_HD, NULL),
     ACQ_DEFAULT(pixel_advance_mode,          acqInt,       0, PSL_ACQ_HD, NULL),
     ACQ_DEFAULT(input_logic_polarity,        acqInt,       0, PSL_ACQ_HD, NULL),
+    ACQ_DEFAULT(gate_ignore,                 acqInt,       0, PSL_ACQ_HD, NULL),
     ACQ_DEFAULT(sync_count,                  acqInt,       0, PSL_ACQ_HD, NULL),
 };
 
@@ -1174,6 +1192,11 @@ PSL_STATIC void psl__FreeResponse(Sinc_Response* resp)
             case SI_TORO__SINC__MESSAGE_TYPE__SOFTWARE_UPDATE_COMPLETE_RESPONSE:
                 si_toro__sinc__software_update_complete_response__free_unpacked(resp->response,
                                                                                 NULL);
+                break;
+
+            case SI_TORO__SINC__MESSAGE_TYPE__CHECK_PARAM_CONSISTENCY_RESPONSE:
+                si_toro__sinc__check_param_consistency_command__free_unpacked(resp->response,
+                                                                              NULL);
                 break;
 
             default:
@@ -2707,6 +2730,8 @@ ACQ_HANDLER_DECL(detection_filter)
                 acq->value.ref.i = XIA_FILTER_MID_RATE;
             else if (STREQ(kv->optionval, "highRate"))
                 acq->value.ref.i = XIA_FILTER_HIGH_RATE;
+            else if (STREQ(kv->optionval, "maxThroughput"))
+                acq->value.ref.i = XIA_FILTER_MAX_THROUGHPUT;
             else {
                 status = XIA_BAD_VALUE;
             }
@@ -2730,13 +2755,15 @@ ACQ_HANDLER_DECL(detection_filter)
         si_toro__sinc__key_value__init(&kv);
         kv.key = (char*) "pulse.sourceType";
         if (*value == XIA_FILTER_LOW_ENERGY)
-          kv.optionval = (char*) "lowEnergy";
+            kv.optionval = (char*) "lowEnergy";
         else if (*value == XIA_FILTER_LOW_RATE)
-          kv.optionval = (char*) "lowRate";
+            kv.optionval = (char*) "lowRate";
         else if (*value == XIA_FILTER_MID_RATE)
-          kv.optionval = (char*) "midRate";
+            kv.optionval = (char*) "midRate";
         else if (*value == XIA_FILTER_HIGH_RATE)
-          kv.optionval = (char*) "highRate";
+            kv.optionval = (char*) "highRate";
+        else if (*value == XIA_FILTER_MAX_THROUGHPUT)
+            kv.optionval = (char*) "maxThroughput";
         else {
             status = XIA_BAD_VALUE;
             pslLog(PSL_LOG_ERROR, status,
@@ -3642,70 +3669,39 @@ ACQ_HANDLER_DECL(input_logic_polarity)
     ACQ_HANDLER_LOG(input_logic_polarity);
 
     if (read) {
-        SiToro__Sinc__GetParamResponse* resp = NULL;
-        SiToro__Sinc__KeyValue*         kv;
-
-        status = psl__GetParam(module, channel,
-                               "gate.statsCollectionMode", &resp);
-        if (status != XIA_SUCCESS) {
-            pslLog(PSL_LOG_ERROR, status,
-                   "Unable to get the gate mode");
-            return status;
-        }
-
-        kv = resp->results[0];
-
-        if (kv->has_paramtype &&
-            (kv->paramtype == SI_TORO__SINC__KEY_VALUE__PARAM_TYPE__OPTION_TYPE)) {
-            if (STREQ(kv->optionval, "off") || STREQ(kv->optionval, "whenHigh"))
-                acq->value.ref.i = XIA_GATE_COLLECT_HI;
-            else if (STREQ(kv->optionval, "whenLow"))
-                acq->value.ref.i = XIA_GATE_COLLECT_LO;
-            else if (STREQ(kv->optionval, "always"))
-                acq->value.ref.i = XIA_GATE_COLLECT_BOTH;
-            else {
-                status = XIA_BAD_VALUE;
-                pslLog(PSL_LOG_ERROR, status, "Unsupported gate mode '%s'",
-                       kv->optionval);
-            }
-            if (status == XIA_SUCCESS)
-                *value = (double) acq->value.ref.i;
-        } else {
-            status = XIA_BAD_VALUE;
-            pslLog(PSL_LOG_ERROR, status,
-                   "Unable to parse gate mode response");
-        }
-
-        si_toro__sinc__get_param_response__free_unpacked(resp, NULL);
-
-        if (status != XIA_SUCCESS) {
-            return status;
-        }
+        *value = (double) acq->value.ref.i;
     }
     else {
-        SiToro__Sinc__KeyValue kv;
+        if (*value != (double) XIA_GATE_COLLECT_HI &&
+            *value != (double) XIA_GATE_COLLECT_LO)
+            return XIA_TYPEVAL_OOR;
 
-        si_toro__sinc__key_value__init(&kv);
-        kv.key = (char*) "gate.statsCollectionMode";
-        if (*value == XIA_GATE_COLLECT_HI)
-            kv.optionval = (char*) "whenHigh";
-        else if (*value == XIA_GATE_COLLECT_LO)
-            kv.optionval = (char*) "whenLow";
-        else if (*value == XIA_GATE_COLLECT_BOTH)
-            kv.optionval = (char*) "always";
-        else {
-            status = XIA_BAD_VALUE;
-            pslLog(PSL_LOG_ERROR, status,
-                   "invalid gate mode");
-            return status;
-        }
+        acq->value.ref.i = (int64_t) *value;
+    }
 
-        status = psl__SetParam(module, detector, &kv);
-        if (status != XIA_SUCCESS) {
-            pslLog(PSL_LOG_ERROR, status,
-                  "Unable to set the gate mode");
-            return status;
-        }
+    return status;
+}
+
+/* The set is performed on run start because a single SINC param is
+ * shared by input_logic_polarity and gate_ignore.
+ */
+ACQ_HANDLER_DECL(gate_ignore)
+{
+    int status = XIA_SUCCESS;
+
+    UNUSED(detector);
+    UNUSED(fDetector);
+    UNUSED(defaults);
+
+    ACQ_HANDLER_LOG(gate_ignore);
+
+    if (read) {
+        *value = (double) acq->value.ref.i;
+    }
+    else {
+        if ((*value != 0.0) && (*value != 1.0))
+            return XIA_TYPEVAL_OOR;
+        acq->value.ref.i = (int64_t) *value;
     }
 
     return status;
@@ -4100,7 +4096,6 @@ PSL_STATIC int psl__Start_MappingMode_0(unsigned short resume,
 /*
  * Mapping Mode 1: Full Spectrum Mapping.
  */
-
 PSL_STATIC int psl__Stop_MappingMode_1(Module* module, Detector* detector)
 {
     int status = XIA_SUCCESS;
@@ -4219,6 +4214,22 @@ PSL_STATIC int psl__Start_MappingMode_1(unsigned short resume,
                    module->alias, channel);
             psl__Stop_MappingMode_1(module, chanDetector);
             return status;
+        }
+
+        /*
+         * Translate input_logic_polarity/gate_ignore to the SINC gate
+         * collection mode.
+         */
+        if (pixel_advance_mode->value.ref.i == XIA_MAPPING_CTL_GATE) {
+            status = psl__SyncGateCollectionMode(module, chanDetector);
+
+            if (status != XIA_SUCCESS) {
+                pslLog(PSL_LOG_ERROR, status,
+                       "Error syncing the gate collection mode for starting mm1: %s:%d",
+                       module->alias, channel);
+                psl__Stop_MappingMode_1(module, chanDetector);
+                return status;
+            }
         }
 
         status = psl__DetectorLock(chanDetector);
@@ -7101,6 +7112,36 @@ PSL_STATIC int psl__ReceiveSoftwareUpdateComplete(Module* module, SincBuffer* pa
     return XIA_SUCCESS;
 }
 
+PSL_STATIC int psl__ReceiveCheckParamConsistency(Module* module, SincBuffer* packet)
+{
+    int status;
+
+    FalconXNModule* fModule = module->pslData;
+
+    int channel = -1;
+
+    SiToro__Sinc__CheckParamConsistencyResponse *resp;
+
+    SincError se;
+
+    status = SincDecodeCheckParamConsistencyResponse(&se,
+                                                     packet,
+                                                     &resp,
+                                                     &channel);
+    if (status != true) {
+        status = falconXNSincErrorToHandel(&se);
+        psl__ModuleStatusResponse(module, status);
+        pslLog(PSL_LOG_ERROR, status,
+               "Decode from FalconXN connection failed: %s:%d",
+               fModule->hostAddress, fModule->portBase);
+        return status;
+    }
+
+    return psl__ModuleResponse(module, channel,
+                               SI_TORO__SINC__MESSAGE_TYPE__CHECK_PARAM_CONSISTENCY_RESPONSE,
+                               resp);
+}
+
 PSL_STATIC int psl__ModuleReceiveProcessor(Module*                   module,
                                            SiToro__Sinc__MessageType msgType,
                                            SincBuffer*               packet)
@@ -7167,6 +7208,10 @@ PSL_STATIC int psl__ModuleReceiveProcessor(Module*                   module,
 
         case SI_TORO__SINC__MESSAGE_TYPE__SOFTWARE_UPDATE_COMPLETE_RESPONSE:
             status = psl__ReceiveSoftwareUpdateComplete(module, packet);
+            break;
+
+        case SI_TORO__SINC__MESSAGE_TYPE__CHECK_PARAM_CONSISTENCY_RESPONSE:
+            status = psl__ReceiveCheckParamConsistency(module, packet);
             break;
 
         case SI_TORO__SINC__MESSAGE_TYPE__NO_MESSAGE_TYPE:
@@ -8777,6 +8822,53 @@ PSL_STATIC int psl__SyncNumberMCAChannels(Module *module, Detector *detector)
     return XIA_SUCCESS;
 }
 
+/*
+ * Combine XMAP-style gate collection values into one SINC param.
+ */
+PSL_STATIC int psl__SyncGateCollectionMode(Module *module, Detector *detector)
+{
+    AcquisitionValue *input_logic_polarity;
+    AcquisitionValue *gate_ignore;
+
+    FalconXNDetector *fDetector;
+
+    SiToro__Sinc__KeyValue kv;
+
+    int status;
+
+    fDetector = detector->pslData;
+
+    input_logic_polarity = psl__GetAcquisition(fDetector, "input_logic_polarity");
+    gate_ignore = psl__GetAcquisition(fDetector, "gate_ignore");
+    ASSERT(input_logic_polarity);
+    ASSERT(gate_ignore);
+
+    si_toro__sinc__key_value__init(&kv);
+    kv.key = (char*) "gate.statsCollectionMode";
+
+    if (input_logic_polarity->value.ref.i == XIA_GATE_COLLECT_LO) {
+        if (gate_ignore->value.ref.i == 1)
+            kv.optionval = (char*) "risingEdge";
+        else
+            kv.optionval = (char*) "whenLow";
+    }
+    else { /* XIA_GATE_COLLECT_HI */
+        if (gate_ignore->value.ref.i == 1)
+            kv.optionval = (char*) "fallingEdge";
+        else
+            kv.optionval = (char*) "whenHigh";
+    }
+
+    status = psl__SetParam(module, detector, &kv);
+    if (status != XIA_SUCCESS) {
+        pslLog(PSL_LOG_ERROR, status,
+               "Unable to set the gate collection mode");
+        return status;
+    }
+
+    return XIA_SUCCESS;
+}
+
 /**
  * @addtogroup falconxn_psl
  * @section falconxn_boardops Board Operations
@@ -8784,17 +8876,68 @@ PSL_STATIC int psl__SyncNumberMCAChannels(Module *module, Detector *detector)
 
 /**
  * @boardop{apply,(null)}
- * Empty implementation, included only for compatibility with other Handel programs.
+ * Acquisition values are applied immediately by
+ * xiaSetAcquisitinValues. The apply operation may be called as a
+ * debugging step to check internal consistency of the parameters on
+ * the board.
  * @endpsl
  */
 PSL_STATIC int psl__BoardOp_Apply(int detChan, Detector* detector, Module* module,
                                   const char *name, void *value)
 {
+    int status = XIA_SUCCESS;
+
+    int channel = xiaGetModDetectorChan(detChan);
+
+    uint8_t    pad[256];
+    SincBuffer packet = SINC_BUFFER_INIT(pad);
+
+    Sinc_Response response;
+    SiToro__Sinc__CheckParamConsistencyResponse* resp = NULL;
+
     UNUSED(detChan);
     UNUSED(name);
     UNUSED(value);
 
     xiaPSLBadArgs(module, detector, "psl__BoardOp_Apply");
+
+    pslLog(PSL_LOG_INFO, "Checking params consistency for detChan %d", detChan);
+
+    SincEncodeCheckParamConsistency(&packet, channel);
+
+    status = psl__ModuleTransactionSend(module, &packet);
+    if (status != XIA_SUCCESS) {
+        pslLog(PSL_LOG_ERROR, status,
+               "Error checking param consistency");
+        return status;
+    }
+
+    response.channel = -1;
+    response.type = SI_TORO__SINC__MESSAGE_TYPE__CHECK_PARAM_CONSISTENCY_RESPONSE;
+
+    status = psl__ModuleTransactionReceive(module, &response);
+    if (status != XIA_SUCCESS) {
+        return status;
+    }
+
+    resp = response.response;
+
+    if (resp->has_healthy && !resp->healthy) {
+        status = XIA_BAD_VALUE;
+        pslLog(PSL_LOG_ERROR, status, "Params not healthy");
+    }
+
+    if (resp->badkey != NULL) {
+        status = XIA_BAD_VALUE;
+        pslLog(PSL_LOG_ERROR, status, "Bad key: %s", resp->badkey);
+    }
+
+    if (resp->message != NULL) {
+        status = XIA_BAD_VALUE;
+        pslLog(PSL_LOG_ERROR, status, "Check param consistency: %s", resp->message);
+    }
+
+	psl__ModuleTransactionEnd(module);
 
     return XIA_SUCCESS;;
 }

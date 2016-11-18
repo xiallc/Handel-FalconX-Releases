@@ -195,6 +195,8 @@ int main(int argc, char *argv[])
     }
 
     for (channel = 0; channel < channels; ++channel) {
+        int ignored = 0;
+
         printf(" Channel: %d\n", channel);
 
         const AcqNameValues* value = values;
@@ -202,6 +204,12 @@ int main(int argc, char *argv[])
             ACQ_SET_CHECK2(channel, value->name, value->a, value->b);
             ++value;
         }
+
+        /* This isn't strictly needed, but we can test the board's ability to
+         * to check params consistency.
+         */
+        status = xiaBoardOperation(channel, "apply", &ignored);
+        CHECK_ERROR(status);
     }
 
     printf("Cleaning up Handel.\n");

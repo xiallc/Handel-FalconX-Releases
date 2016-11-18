@@ -69,9 +69,8 @@
 #define XIA_MAPPING_CTL_SYNC 2.0
 
 /* GATE polarity */
-#define XIA_GATE_COLLECT_HI   0
-#define XIA_GATE_COLLECT_LO   1
-#define XIA_GATE_COLLECT_BOTH 2
+#define XIA_GATE_COLLECT_HI 0
+#define XIA_GATE_COLLECT_LO 1
 
 /* Trigger and livetime signal output constants */
 #define XIA_OUTPUT_DISABLED        0
@@ -95,10 +94,11 @@
 #define XIA_LIST_MODE_CLOCK      2.0
 
 /* FalconXn detection filter */
-#define XIA_FILTER_LOW_ENERGY 0 /**< Optimize for low energy pulses. */
-#define XIA_FILTER_LOW_RATE   1 /**< Optimize for low rate pulses. */
-#define XIA_FILTER_MID_RATE   2 /**< Optimize for mid rate pulses. */
-#define XIA_FILTER_HIGH_RATE  3 /**< Optimize for high rate pulses. */
+#define XIA_FILTER_LOW_ENERGY     0 /**< Optimize for low energy pulses. */
+#define XIA_FILTER_LOW_RATE       1 /**< Optimize for low rate pulses. */
+#define XIA_FILTER_MID_RATE       2 /**< Optimize for mid rate pulses. */
+#define XIA_FILTER_HIGH_RATE      3 /**< Optimize for high rate pulses. */
+#define XIA_FILTER_MAX_THROUGHPUT 4 /**< Optimize for maximum throughput. */
 
 /* FalconXn SCA trigger mode */
 #define SCA_TRIGGER_OFF 	0 /**< Do not generate SCA pulses. */

@@ -152,13 +152,13 @@ int main(int argc, char** argv)
 
 static void do_run(unsigned short resume)
 {
-    int       status;
-    uint32_t* accepted = NULL;
-    uint32_t* rejected = NULL;
-    int       size = 0;
-    int       wait = 2;
-    int       s;
-    int       run_active = 0;
+    int           status;
+    uint32_t*     accepted   = NULL;
+    uint32_t*     rejected   = NULL;
+    int           size       = 0;
+    int           wait       = 2;
+    int           s;
+    unsigned long run_active = 0;
 
     /* Start MCA mode */
     printf("Start an MCA run.\n");

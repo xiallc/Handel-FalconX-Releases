@@ -108,10 +108,11 @@ static const AcqNameValues falconxn_values[] =
         { "detection_threshold", 0.999, 0.0 },
         { "min_pulse_pair_separation", 1023, 0 },
         { "detection_filter", XIA_FILTER_LOW_ENERGY, XIA_FILTER_HIGH_RATE },
+        { "decay_time", XIA_DECAY_LONG, XIA_DECAY_SHORT },
         { "preset_type", 1, 0 },
         { "preset_value", 50, 0 },
         { "scale_factor", 1, 200 },
-        { "num_map_pixels", 0, 2048 },
+        { "num_map_pixels", 0, 1ull << 32 },
         { "num_map_pixels_per_buffer", 0, 1024 },
         { "pixel_advance_mode", 0, 1 },
         { NULL, 0, 0 }
@@ -252,7 +253,7 @@ int acq_set_check(int detChan, const char* name, double value)
         return FALSE_;
     }
 
-    printf("  %-30s:= %13.3f\n", name, value);
+    printf("  %-30s:= %14.3f\n", name, value);
 
     status = xiaGetAcquisitionValues(detChan, name, &get);
     if (status != XIA_SUCCESS) {

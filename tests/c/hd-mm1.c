@@ -109,7 +109,8 @@ int main(int argc, char *argv[])
     int buffer_number[MAX_DET_CHANNELS];
 
     unsigned long bufferLength = 0;
-    unsigned long *buffer = NULL;
+    size_t bufferSize = 0;
+    uint32_t *buffer = NULL;
 
     double wait_period = 0.050; /* 50 msecs */
     int quiet = 0;
@@ -342,21 +343,22 @@ int main(int argc, char *argv[])
         exit(1);
     }
 
-    buffer = malloc(bufferLength * sizeof(unsigned long));
+    bufferSize = bufferLength * sizeof(uint32_t);
+    buffer = malloc(bufferSize);
 
     if (!buffer) {
         xiaStopRun(-1);
         xiaExit();
 
-        fprintf(stderr, "Unable to allocate a buffer of %lu bytes.\n",
-                bufferLength);
+        fprintf(stderr, "Unable to allocate a buffer of %zu bytes.\n",
+                bufferSize);
         exit(1);
     }
 
-    fprintf(stdout, "  Buffer length: %lu (%lu).\n",
-            bufferLength, bufferLength * sizeof(unsigned long));
+    fprintf(stdout, "  Buffer length: %lu (%zu bytes).\n",
+            bufferLength, bufferSize);
 
-    memset(buffer, 0, bufferLength * sizeof(unsigned long));
+    memset(buffer, 0, bufferSize);
 
     for (det = 0; det < det_channels; ++det) {
         char name[256];
@@ -402,8 +404,8 @@ int main(int argc, char *argv[])
         int any_buffer_full = 0;
         int any_running = 0;
         int buffer_full[MAX_DET_CHANNELS];
-        int active[MAX_DET_CHANNELS];
-        int det_current_pixel = 0;
+        unsigned long active[MAX_DET_CHANNELS];
+        unsigned long det_current_pixel = 0;
         int polls = 0;
 
         double now = difftime(time(NULL), start);
@@ -564,7 +566,7 @@ int main(int argc, char *argv[])
                     exit(1);
                 }
 
-                fprintf(stdout, "Buffer write: det: %d buffer:%d/%c pixel:%d\n",
+                fprintf(stdout, "Buffer write: det: %d buffer:%d/%c pixel:%lu\n",
                         det, buffer_number[det],
                         buffer_done_char[current[det]], det_current_pixel);
 

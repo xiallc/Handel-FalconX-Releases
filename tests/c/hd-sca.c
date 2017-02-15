@@ -124,7 +124,7 @@ static void do_tests()
     int       status;
 
     double    size;
-    unsigned short maxsize, rundata_size;
+    unsigned short maxsize;
     char limit[9];
 
     int       durationS = 5;
@@ -179,11 +179,8 @@ static void do_tests()
     status = xiaGetAcquisitionValues(0, "number_of_scas", &size);
     CHECK_ERROR(status);
 
-    status = xiaGetRunData(0, "sca_length", &rundata_size);
-    CHECK_ERROR(status);
-
-    printf("max_sca_length = %hu sca_length = %hu number_of_scas = %0.0f\n",
-          maxsize, rundata_size, size);
+    printf("max_sca_length = %hu number_of_scas = %0.0f\n",
+          maxsize, size);
 
 
     for (int i = 0; i < size; i++) {

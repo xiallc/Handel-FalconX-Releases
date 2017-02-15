@@ -116,6 +116,7 @@ static const char* falconxn_labels[] =
     "detection_threshold",
     "min_pulse_pair_separation",
     "detection_filter",
+    "decay_time",
     "clock_speed",
     "number_mca_channels",
     "preset_type",

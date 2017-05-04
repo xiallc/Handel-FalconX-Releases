@@ -45,7 +45,7 @@
 #include "md_generic.h"
 
 static void CHECK_ERROR(int status);
-static void free_modules(const char **modules, int len);
+static void free_modules(char **modules, int len);
 
 static void usage(const char* prog)
 {
@@ -58,7 +58,8 @@ int main(int argc, char** argv)
 {
     int status;
 
-    unsigned int numModules;
+    unsigned int numModulesU;
+    int numModules;
     char **modules;
     int i;
 
@@ -105,17 +106,19 @@ int main(int argc, char** argv)
     CHECK_ERROR(status);
 
     printf("Querying the modules... ");
-    status = xiaGetNumModules(&numModules);
+    status = xiaGetNumModules(&numModulesU);
     CHECK_ERROR(status);
 
-    modules = malloc(sizeof(char *) * numModules);
+    numModules = (int) numModulesU;
+
+    modules = malloc(sizeof(char *) * numModulesU);
     if (!modules) {
         printf("No memory for module names\n");
         status = XIA_NOMEM;
         CHECK_ERROR(status);
     }
 
-    for (i = 0; i < (int)numModules; i++) {
+    for (i = 0; i < numModules; i++) {
         modules[i] = malloc(sizeof(char) * MAXALIAS_LEN);
         if (!modules[i]) {
             free_modules(modules, numModules);
@@ -134,7 +137,7 @@ int main(int argc, char** argv)
     printf("%u configured.\n", numModules);
 
     /* Get info for each module */
-    for (i = 0; i < (int)numModules; i++) {
+    for (i = 0; i < numModules; i++) {
         int detChan;
         int boardChannelCount;
         unsigned int number_of_channels;
@@ -228,17 +231,18 @@ static void CHECK_ERROR(int status)
 /*
  * Clean up the allocated module aliases.
  */
-static void free_modules(const char **modules, int len)
+static void free_modules(char **modules, int len)
 {
     if (modules) {
         int i;
 
         for (i = 0; i < len; i++) {
             if (modules[i]) {
-                free((char *)modules[i]);
+                free(modules[i]);
+                modules[i] = NULL;
             }
         }
 
-        free((char *)modules);
+        free(modules);
     }
 }

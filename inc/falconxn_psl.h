@@ -129,7 +129,6 @@ typedef int (*AcqValue_FP)(Module*           module,
                            int               channel,
                            FalconXNDetector* fDetector,
                            XiaDefaults*      defaults,
-                           AcquisitionValue* acq,
 						   const char	     *name,
                            double*           value,
                            boolean_t         read);
@@ -152,7 +151,7 @@ typedef enum acqValueTypes {
     acqString
 } acqValueTypes;
 
-typedef struct acqValye {
+typedef struct acqValue {
     acqValueTypes type;
     union {
         double       f;
@@ -174,7 +173,7 @@ typedef struct acqValye {
 struct _AcquisitionValue {
     const char*      name;
     double           defaultValue;
-    acqValue         value;
+    acqValueTypes    type;
     uint32_t         flags;
     AcqValue_FP      handler;
     SynchAcqValue_FP sync;
@@ -276,10 +275,6 @@ struct _FalconXNDetector {
 
     /* Set to true once all ACQ values have been set. */
     boolean_t valid_acq_values;
-
-    /* The number of acquisition values. */
-    int               numOfAcqValues;
-    AcquisitionValue* acqValues;
 
     /* Lock for shared data in this structure. */
     handel_md_Mutex lock;

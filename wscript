@@ -16,21 +16,14 @@ if not os.getenv('WAFLOCK'):
     out = 'build-' + sys.platform
 
 def options(opt):
-    opt.add_option('--sitoro',
-                   action = 'store',
-                   default = '',
-                   dest = 'sitoro_path',
-                   help = 'Set the path to the SiToro release.')
-    opt.add_option('--release',
-                   action = 'store_true',
-                   default = False,
-                   dest = 'releasing',
-                   help = 'Update xia_version.h with version control info.')
-    opt.add_option('--show-commands',
-                   action = 'store_true',
-                   default = False,
-                   dest = 'show_commands',
-                   help = 'Print the commands as strings.')
+    opt.add_option('--autoconfigure', action='callback', callback=set_autoconfigure,
+                   help='Call configure automatically when needed.')
+    opt.add_option('--sitoro', action='store', dest='sitoro_path', default='',
+                   help='Set the path to the SiToro release.')
+    opt.add_option('--release', action='store_true', dest='releasing', default=False,
+                   help='Update xia_version.h with version control info.')
+    opt.add_option('--show-commands', action='store_true', dest='show_commands', default=False,
+                   help='Print the commands as strings.')
     opt.load('compiler_c')
 
 
@@ -336,6 +329,12 @@ def msvc_get_flags(ctx):
                              'release': plp } }
 
     return flags
+
+#
+# Custom optparse handler to set autoconfig from the command line options.
+#
+def set_autoconfigure(option, opt, value, parser):
+    Configure.autoconfig = True
 
 #
 # Parse the sitoro option and set the cc uselib variables if the library

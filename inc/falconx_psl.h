@@ -31,9 +31,6 @@
  * TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF
  * THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
- *
- * $Id$
- *
  */
 
 
@@ -107,7 +104,7 @@ typedef enum acqValueTypes {
     acqString,
 } acqValueTypes;
 
-typedef struct acqValye {
+typedef struct acqValue {
     acqValueTypes type;
     union {
         double    d;

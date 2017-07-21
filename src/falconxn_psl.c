@@ -185,7 +185,7 @@ PSL_STATIC int psl__BoardOp_Apply(int detChan, Detector* detector, Module* modul
 PSL_STATIC int psl__BoardOp_BufferDone(int detChan, Detector* detector, Module* module,
                                        const char *name, void *value);
 PSL_STATIC int psl__BoardOp_MappingPixelNext(int detChan, Detector* detector, Module* module,
-                                       const char *name, void *value);
+                                             const char *name, void *value);
 PSL_STATIC int psl__BoardOp_GetBoardInfo(int detChan, Detector* detector, Module* module,
                                          const char *name, void *value);
 PSL_STATIC int psl__BoardOp_GetConnected(int detChan, Detector* detector, Module* module,
@@ -198,6 +198,8 @@ PSL_STATIC int psl__BoardOp_GetFirmwareVersion(int detChan, Detector* detector, 
                                                const char *name, void *value);
 
 /* Helpers */
+PSL_STATIC PSL_INLINE int psl__SetAcqValue(acqValue*    acqVal,
+                                           const double value);
 PSL_STATIC bool psl__AcqRemoved(const char *name);
 PSL_STATIC Detector* psl__FindDetector(Module* module, int channel);
 PSL_STATIC int psl__GetParam(Module* module, int channel, const char* name,
@@ -214,36 +216,37 @@ PSL_STATIC int psl__SyncPresetType(Module *module, Detector *detector);
 PSL_STATIC int psl__SyncPixelAdvanceMode(Module *module, Detector *detector);
 PSL_STATIC int psl__SetHistogramMode(Module *module, Detector *detector,
                                      const char *mode);
-PSL_STATIC int psl__SyncNumberMCAChannels(Module *module, Detector *detector);
+PSL_STATIC int psl__SyncNumberMCAChannels(Module *module, Detector *detector,
+                                          int64_t number_mca_channels,
+                                          int64_t mca_start_channel);
 PSL_STATIC int psl__SyncGateCollectionMode(Module *module, Detector *detector);
 
 /* Acquisition value handler */
-#define ACQ_HANDLER_DECL(_n) \
-    PSL_STATIC int psl__Acq_ ## _n (Module*           module, \
-                                    Detector*         detector, \
-                                    int               channel, \
-                                    FalconXNDetector* fDetector, \
-                                    XiaDefaults*      defaults, \
-                                    AcquisitionValue* acq, \
-                                    const char        *name, \
-                                    double*           value, \
+#define ACQ_HANDLER_DECL(_n)                                        \
+    PSL_STATIC int psl__Acq_ ## _n (Module*           module,       \
+                                    Detector*         detector,     \
+                                    int               channel,      \
+                                    FalconXNDetector* fDetector,    \
+                                    XiaDefaults*      defaults,     \
+                                    const char        *name,        \
+                                    double*           value,        \
                                     boolean_t         read)
 #define ACQ_HANDLER(_n) psl__Acq_ ## _n
 /* #define ACQ_HANDLER_NAME(_n) "psl__Acq_" # _n */
-#define ACQ_HANDLER_LOG(_n) \
-    pslLog(PSL_LOG_DEBUG, "ACQ %s: %s (%s:%d)",   \
+#define ACQ_HANDLER_LOG(_n)                                         \
+    pslLog(PSL_LOG_DEBUG, "ACQ %s: %s (%s:%d)",                     \
            read ? "read": "write", name, module->alias, channel)
 
-#define ACQ_SYNC_DECL(_n) \
-    PSL_STATIC int psl__Sync_ ## _n (int               detChan, \
-                                     int               channel, \
-                                     Module*           module, \
-                                     Detector*         detector, \
+#define ACQ_SYNC_DECL(_n)                                           \
+    PSL_STATIC int psl__Sync_ ## _n (int               detChan,     \
+                                     int               channel,     \
+                                     Module*           module,      \
+                                     Detector*         detector,    \
                                      XiaDefaults*      defaults)
 #define ACQ_SYNC(_n) psl__Sync_ ## _n
 /* #define ACQ_SYNC_NAME(_n) "psl__Sync_" # _n */
 /* #define ACQ_SYNC_CALL(_n) ACQ_SYNC(_n)(detChan, channel, module, detector, fDetector, defaults) */
-#define ACQ_SYNC_LOG(_n, _v) \
+#define ACQ_SYNC_LOG(_n, _v)                        \
     pslLog(PSL_LOG_DEBUG, "%s = %5.3f", # _n, _v)
 
 ACQ_HANDLER_DECL(analog_gain);
@@ -287,13 +290,12 @@ ACQ_HANDLER_DECL(sync_count);
 
 
 /* The default acquisition values. */
-#define ACQ_DEFAULT(_n, _t, _d, _f, _s) \
-    { # _n, (_d), { (_t), { (double) 0 } }, (_f), ACQ_HANDLER(_n), _s}
+#define ACQ_DEFAULT(_n, _t, _d, _f, _s)                                 \
+    { # _n, (_d), (_t), (_f), ACQ_HANDLER(_n), _s}
 
 /* Compact the flags to make the table narrower. */
-/*#define PSL_ACQ_E    PSL_ACQ_EMPTY */
+#define PSL_ACQ_E    PSL_ACQ_EMPTY
 #define PSL_ACQ_HD   PSL_ACQ_HAS_DEFAULT
-#define PSL_ACQ_L    PSL_ACQ_LOCAL
 #define PSL_ACQ_RO   PSL_ACQ_READ_ONLY
 #define PSL_ACQ_L_HD PSL_ACQ_LOCAL | PSL_ACQ_HAS_DEFAULT
 
@@ -333,11 +335,11 @@ static const AcquisitionValue DEFAULT_ACQ_VALUES[] = {
     ACQ_DEFAULT(preset_type,                 acqInt,     0.0, PSL_ACQ_HD, NULL),
     ACQ_DEFAULT(preset_value,                acqFloat,   0.0, PSL_ACQ_HD, NULL),
     ACQ_DEFAULT(scale_factor,                acqFloat,   2.0, PSL_ACQ_HD, NULL),
-    ACQ_DEFAULT(mca_bin_width,               acqFloat,  10.0, PSL_ACQ_HD, NULL),
+    ACQ_DEFAULT(mca_bin_width,               acqFloat,  10.0, PSL_ACQ_L_HD, NULL),
     ACQ_DEFAULT(sca_trigger_mode,            acqInt,     SCA_TRIGGER_ALWAYS, PSL_ACQ_HD, NULL),
     ACQ_DEFAULT(sca_pulse_duration,          acqInt,   400.0, PSL_ACQ_HD, NULL),
     ACQ_DEFAULT(number_of_scas,              acqInt,     0.0, PSL_ACQ_HD, NULL),
-    ACQ_DEFAULT(sca,                         acqFloat,   0.0, PSL_ACQ_L,  NULL),
+    ACQ_DEFAULT(sca,                         acqFloat,   0.0, PSL_ACQ_E,  NULL),
     ACQ_DEFAULT(num_map_pixels_per_buffer,   acqInt,    1024, PSL_ACQ_HD, NULL),
     ACQ_DEFAULT(num_map_pixels,              acqInt,       0, PSL_ACQ_HD, NULL),
     ACQ_DEFAULT(pixel_advance_mode,          acqInt,       0, PSL_ACQ_HD, NULL),
@@ -346,7 +348,7 @@ static const AcquisitionValue DEFAULT_ACQ_VALUES[] = {
     ACQ_DEFAULT(sync_count,                  acqInt,       0, PSL_ACQ_HD, NULL),
 };
 
-#define SI_DET_NUM_OF_ACQ_VALUES (sizeof(DEFAULT_ACQ_VALUES) / sizeof(const AcquisitionValue))
+#define SI_DET_NUM_OF_DEFAULT_ACQ_VALUES ((int)(sizeof(DEFAULT_ACQ_VALUES) / sizeof(const AcquisitionValue)))
 
 /* These are allowed in old ini files but not from the API. */
 static const char* REMOVED_ACQ_VALUES[] = {
@@ -358,19 +360,19 @@ static const char* REMOVED_ACQ_VALUES[] = {
 
 /* These are the allowed board operations for this hardware */
 static  BoardOperation boardOps[] =
-  {
-    { "apply",                psl__BoardOp_Apply },
-    { "buffer_done",          psl__BoardOp_BufferDone },
-    { "mapping_pixel_next",   psl__BoardOp_MappingPixelNext },
+    {
+        { "apply",                psl__BoardOp_Apply },
+        { "buffer_done",          psl__BoardOp_BufferDone },
+        { "mapping_pixel_next",   psl__BoardOp_MappingPixelNext },
 
-    { "get_board_info",       psl__BoardOp_GetBoardInfo },
+        { "get_board_info",       psl__BoardOp_GetBoardInfo },
 
-    /* FalconXn Specific board operations. */
-    { "get_connected",        psl__BoardOp_GetConnected },
-    { "get_channel_count",    psl__BoardOp_GetChannelCount },
-    { "get_serial_number",    psl__BoardOp_GetSerialNumber },
-    { "get_firmware_version", psl__BoardOp_GetFirmwareVersion }
-  };
+        /* FalconXn Specific board operations. */
+        { "get_connected",        psl__BoardOp_GetConnected },
+        { "get_channel_count",    psl__BoardOp_GetChannelCount },
+        { "get_serial_number",    psl__BoardOp_GetSerialNumber },
+        { "get_firmware_version", psl__BoardOp_GetFirmwareVersion }
+    };
 
 /* The PSL Handlers table. This is exported to Handel. */
 static PSLHandlers handlers;
@@ -503,56 +505,91 @@ PSL_STATIC int falconXNSincErrorToHandel(SincError* se)
  * the given name could have additional parameters appended to it
  * e.g. scalo_0 can match "sca"
  */
-PSL_STATIC AcquisitionValue* psl__GetAcquisition(FalconXNDetector* fDetector,
-                                                 const char*       name)
+PSL_STATIC const AcquisitionValue* psl__GetAcquisition(const char* name)
 {
     int i;
-    for (i = 0; i < fDetector->numOfAcqValues; i++) {
-        if (STRNEQ(name, fDetector->acqValues[i].name)) {
-            return &fDetector->acqValues[i];
+    for (i = 0; i < SI_DET_NUM_OF_DEFAULT_ACQ_VALUES; i++) {
+        if (STRNEQ(name, DEFAULT_ACQ_VALUES[i].name)) {
+            return &DEFAULT_ACQ_VALUES[i];
         }
     }
     return NULL;
 }
 
 /*
+ * Get a typed acq value from its default. It is a debug exception to call
+ * on a READ_ONLY value or if the default does not exist. After UserSetup
+ * all settable values should have defaults.
+ */
+PSL_STATIC acqValue psl__GetAcqValue(FalconXNDetector* fDetector,
+                                     const char*       name)
+{
+    int status;
+
+    const AcquisitionValue *acq = psl__GetAcquisition(name);
+    ASSERT(acq);
+
+    double value;
+
+    XiaDefaults *defaults = xiaGetDefaultFromDetChan(fDetector->detChan);
+    ASSERT(defaults);
+
+    acqValue acqVal = {acq->type, {-12345}};
+
+    if (PSL_ACQ_FLAG_SET(acq, PSL_ACQ_READ_ONLY)) {
+        FAIL();
+    }
+    else {
+        status = pslGetDefault(name, &value, defaults);
+        ASSERT(status == XIA_SUCCESS);
+
+        status = psl__SetAcqValue(&acqVal, value);
+        if (status != XIA_SUCCESS) {
+            pslLog(PSL_LOG_WARNING,
+                   "Unable to convert the default value: %s", name);
+        }
+    }
+
+    return acqVal;
+}
+
+/*
  * Convert the Handel standard double to the specified type.
  */
-#define PSL__CONVERT_TO(_t, _T, _R, _m, _M) \
-PSL_STATIC int psl__ConvertTo_ ## _t (AcquisitionValue* acq, \
-                                      const double      value) { \
-    if (acq->value.type != _T) \
-        return XIA_UNKNOWN_VALUE; \
-    if ((value < (double) _m) || (value > (double) _M))  \
-        return XIA_ACQ_OOR; \
-    acq->value.ref._R = (_t) value; \
-    return XIA_SUCCESS; \
-}
+#define PSL__CONVERT_TO(_t, _T, _R, _m, _M)                             \
+    PSL_STATIC int psl__ConvertTo_ ## _t (acqValue*         acq,        \
+                                          const double      value) {    \
+        if (acq->type != _T)                                            \
+            return XIA_UNKNOWN_VALUE;                                   \
+        if ((value < (double) _m) || (value > (double) _M))             \
+            return XIA_ACQ_OOR;                                         \
+        acq->ref._R = (_t) value;                                       \
+        return XIA_SUCCESS;                                             \
+    }
 
 PSL__CONVERT_TO(int64_t, acqInt,   i,       LLONG_MIN,               LLONG_MAX)
 PSL__CONVERT_TO(bool,    acqBool,  b,                0,                      1)
-PSL__CONVERT_TO(MM_Mode, acqInt,   i, MAPPING_MODE_MCA, MAPPING_MODE_COUNT - 1)
 
-PSL_STATIC PSL_INLINE int psl__SetAcqValue(AcquisitionValue* acq,
-                                           const double      value)
+PSL_STATIC PSL_INLINE int psl__SetAcqValue(acqValue*    acqVal,
+                                           const double value)
 {
     int status = XIA_SUCCESS;
-    if (acq) {
-        switch (acq->value.type)
+    if (acqVal) {
+        switch (acqVal->type)
         {
-            case acqFloat:
-                acq->value.ref.f = value;
-                break;
-            case acqInt:
-                status = psl__ConvertTo_int64_t(acq, value);
-                break;
-            case acqBool:
-                status = psl__ConvertTo_bool(acq, value);
-                break;
-            case acqString:
-            default:
-                status = XIA_BAD_TYPE;
-                break;
+        case acqFloat:
+            acqVal->ref.f = value;
+            break;
+        case acqInt:
+            status = psl__ConvertTo_int64_t(acqVal, value);
+            break;
+        case acqBool:
+            status = psl__ConvertTo_bool(acqVal, value);
+            break;
+        case acqString:
+        default:
+            status = XIA_BAD_TYPE;
+            break;
         }
     }
     else {
@@ -564,116 +601,57 @@ PSL_STATIC PSL_INLINE int psl__SetAcqValue(AcquisitionValue* acq,
 /* Converts a SiToro__Sinc__KeyValue boolval response to a Handel boolean_t.
  * Use this to avoid size warnings.
  */
-#define PSL_BOOL_OF_KV(kv) (kv->boolval ? TRUE_ : FALSE_)
-
-/* Acquisition value bool value to double. */
-#define PSL_ACQ_GET_BOOL(acq) (acq->value.ref.b ? 1.0 : 0.0)
+#define PSL_BOOL_OF_BOOLVAL(boolt) (boolt ? TRUE_ : FALSE_)
 
 /*
- * Update the acq value's default.
+ * Update the default, adding it if needed.
  */
 PSL_STATIC int psl__UpdateDefault(XiaDefaults*      defaults,
                                   const char*       name,
-                                  AcquisitionValue* acq)
+                                  double            value)
 {
-    if (!PSL_ACQ_FLAG_SET(acq, PSL_ACQ_READ_ONLY)) {
-        int status;
+    int status;
 
-        double value = 0;
+    pslLog(PSL_LOG_INFO, "Name: %s = %0.3f", name, value);
 
-        switch (acq->value.type)
-        {
-            case acqFloat:
-            default:
-                value = acq->value.ref.f;
-                break;
-            case acqInt:
-                value = (double) acq->value.ref.i;
-                break;
-            case acqBool:
-                value = (double) acq->value.ref.b;
-                break;
-            case acqString:
-                status = XIA_BAD_VALUE;
-                pslLog(PSL_LOG_ERROR, status,
-                       "Bad type for value");
-                return status;
-        }
+    status = pslSetDefault(name, &value, defaults);
 
-        pslLog(PSL_LOG_INFO, "Name: %s = %0.3f", name, value);
+    if (status != XIA_SUCCESS) {
+        if (status == XIA_NOT_FOUND) {
+            boolean_t adding = TRUE_;
+            while (adding) {
+                pslLog(PSL_LOG_DEBUG,
+                       "Adding default entry %s to %s", name, defaults->alias);
 
-        status = pslSetDefault(name, &value, defaults);
+                status = xiaAddDefaultItem(defaults->alias, name, &value);
+                if (status == XIA_SUCCESS) {
+                    adding = FALSE_;
+                } else {
+                    if (status == XIA_NO_ALIAS) {
+                        pslLog(PSL_LOG_DEBUG,
+                               "Adding defaults %s", defaults->alias);
 
-        if (status != XIA_SUCCESS) {
-            if (status == XIA_NOT_FOUND) {
-                boolean_t adding = TRUE_;
-                while (adding) {
-                    pslLog(PSL_LOG_DEBUG,
-                           "Adding default entry %s to %s", name, defaults->alias);
-
-                    status = xiaAddDefaultItem(defaults->alias, name, &value);
-                    if (status == XIA_SUCCESS) {
-                        adding = FALSE_;
-                    } else {
-                        if (status == XIA_NO_ALIAS) {
-                            pslLog(PSL_LOG_DEBUG,
-                                   "Adding defaults %s", defaults->alias);
-
-                            status = xiaNewDefault(defaults->alias);
-                            if (status != XIA_SUCCESS) {
-                                pslLog(PSL_LOG_ERROR, status,
-                                       "Error creating new default alias: %s",
-                                       defaults->alias);
-                                return status;
-                            }
-                        }
-                        else {
+                        status = xiaNewDefault(defaults->alias);
+                        if (status != XIA_SUCCESS) {
                             pslLog(PSL_LOG_ERROR, status,
-                                   "Error adding  default item to %s: %s",
-                                   defaults->alias, name);
+                                   "Error creating new default alias: %s",
+                                   defaults->alias);
                             return status;
                         }
                     }
+                    else {
+                        pslLog(PSL_LOG_ERROR, status,
+                               "Error adding  default item to %s: %s",
+                               defaults->alias, name);
+                        return status;
+                    }
                 }
-            }
-            else {
-                pslLog(PSL_LOG_ERROR, status,
-                       "Error setting default: %s", name);
-                return status;
             }
         }
-
-        acq->flags |= PSL_ACQ_HAS_DEFAULT;
-    }
-
-    return XIA_SUCCESS;
-}
-
-/*
- * Check the defaults and if they have are
-*/
-PSL_STATIC int psl__ReloadDefaults(FalconXNDetector* fDetector)
-{
-    XiaDefaults *defaults = xiaGetDefaultFromDetChan(fDetector->detChan);
-
-    if (defaults) {
-        XiaDaqEntry* entry = defaults->entry;
-
-        while (entry) {
-            int status = XIA_SUCCESS;
-
-            AcquisitionValue* acq = psl__GetAcquisition(fDetector, entry->name);
-
-            if (acq) {
-                status = psl__SetAcqValue(acq, entry->data);
-                if (status != XIA_SUCCESS) {
-                    pslLog(PSL_LOG_ERROR, status,
-                           "Unable to convert the default value: %s", entry->name);
-                    return status;
-                }
-            }
-
-            entry = entry->next;
+        else {
+            pslLog(PSL_LOG_ERROR, status,
+                   "Error setting default: %s", name);
+            return status;
         }
     }
 
@@ -691,7 +669,7 @@ PSL_STATIC int psl__SetDetectorTypeValue(int detChan, Detector *det)
 
 PSL_STATIC void psl__CheckConnected(FalconXNDetector *fDetector)
 {
-        UNUSED(fDetector);
+    UNUSED(fDetector);
 }
 
 PSL_STATIC int psl__ModuleLock(Module* module)
@@ -826,48 +804,48 @@ PSL_STATIC void psl__FreeResponse(Sinc_Response* resp)
 {
     if (resp->response != NULL) {
         switch (resp->type) {
-            case SI_TORO__SINC__MESSAGE_TYPE__SUCCESS_RESPONSE:
-                si_toro__sinc__success_response__free_unpacked(resp->response,
-                                                               NULL);
-                break;
+        case SI_TORO__SINC__MESSAGE_TYPE__SUCCESS_RESPONSE:
+            si_toro__sinc__success_response__free_unpacked(resp->response,
+                                                           NULL);
+            break;
 
-            case SI_TORO__SINC__MESSAGE_TYPE__GET_PARAM_RESPONSE:
-                si_toro__sinc__get_param_response__free_unpacked(resp->response,
+        case SI_TORO__SINC__MESSAGE_TYPE__GET_PARAM_RESPONSE:
+            si_toro__sinc__get_param_response__free_unpacked(resp->response,
+                                                             NULL);
+            break;
+
+        case SI_TORO__SINC__MESSAGE_TYPE__GET_CALIBRATION_RESPONSE:
+            break;
+
+        case SI_TORO__SINC__MESSAGE_TYPE__CALCULATE_DC_OFFSET_RESPONSE:
+            si_toro__sinc__calculate_dc_offset_response__free_unpacked(resp->response,
+                                                                       NULL);
+            break;
+
+        case SI_TORO__SINC__MESSAGE_TYPE__LIST_PARAM_DETAILS_RESPONSE:
+            si_toro__sinc__set_calibration_command__free_unpacked(resp->response,
+                                                                  NULL);
+            break;
+
+        case SI_TORO__SINC__MESSAGE_TYPE__PARAM_UPDATED_RESPONSE:
+            si_toro__sinc__param_updated_response__free_unpacked(resp->response,
                                                                  NULL);
-                break;
+            break;
 
-            case SI_TORO__SINC__MESSAGE_TYPE__GET_CALIBRATION_RESPONSE:
-                break;
+        case SI_TORO__SINC__MESSAGE_TYPE__SOFTWARE_UPDATE_COMPLETE_RESPONSE:
+            si_toro__sinc__software_update_complete_response__free_unpacked(resp->response,
+                                                                            NULL);
+            break;
 
-            case SI_TORO__SINC__MESSAGE_TYPE__CALCULATE_DC_OFFSET_RESPONSE:
-                si_toro__sinc__calculate_dc_offset_response__free_unpacked(resp->response,
-                                                                           NULL);
-                break;
+        case SI_TORO__SINC__MESSAGE_TYPE__CHECK_PARAM_CONSISTENCY_RESPONSE:
+            si_toro__sinc__check_param_consistency_command__free_unpacked(resp->response,
+                                                                          NULL);
+            break;
 
-            case SI_TORO__SINC__MESSAGE_TYPE__LIST_PARAM_DETAILS_RESPONSE:
-                si_toro__sinc__set_calibration_command__free_unpacked(resp->response,
-                                                                      NULL);
-                break;
-
-            case SI_TORO__SINC__MESSAGE_TYPE__PARAM_UPDATED_RESPONSE:
-                si_toro__sinc__param_updated_response__free_unpacked(resp->response,
-                                                                     NULL);
-                break;
-
-            case SI_TORO__SINC__MESSAGE_TYPE__SOFTWARE_UPDATE_COMPLETE_RESPONSE:
-                si_toro__sinc__software_update_complete_response__free_unpacked(resp->response,
-                                                                                NULL);
-                break;
-
-            case SI_TORO__SINC__MESSAGE_TYPE__CHECK_PARAM_CONSISTENCY_RESPONSE:
-                si_toro__sinc__check_param_consistency_command__free_unpacked(resp->response,
-                                                                              NULL);
-                break;
-
-            default:
-                pslLog(PSL_LOG_ERROR, XIA_INVALID_VALUE,
-                       "Invalid message type for response free: %d", resp->type);
-                break;
+        default:
+            pslLog(PSL_LOG_ERROR, XIA_INVALID_VALUE,
+                   "Invalid message type for response free: %d", resp->type);
+            break;
         }
 
         psl__FlushResponse(resp);
@@ -1168,33 +1146,33 @@ PSL_STATIC int psl__GetParamValue(Module* module, int channel,
 
 /*
  * Perform the specified gain operation to the hardware.
-*
-*/
+ *
+ */
 PSL_STATIC int psl__GainOperation(int detChan, const char *name, void *value,
                                   Detector *det, int modChan, Module *m, XiaDefaults *defs)
 {
-  int status;
-  double* scaleFactor = (double*) value;
+    int status;
+    double* scaleFactor = (double*) value;
 
-  ASSERT(name  != NULL);
-  ASSERT(value != NULL);
-  ASSERT(defs  != NULL);
-  ASSERT(det   != NULL);
-  ASSERT(m     != NULL);
+    ASSERT(name  != NULL);
+    ASSERT(value != NULL);
+    ASSERT(defs  != NULL);
+    ASSERT(det   != NULL);
+    ASSERT(m     != NULL);
 
-  if (STREQ(name, "calibrate")) {
-    status = psl__GainCalibrate(detChan, det, modChan, m, defs, scaleFactor);
-    if (status != XIA_SUCCESS) {
-        pslLog(PSL_LOG_ERROR, status,
-               "Error doing gain operation '%s' for detChan %d", name, detChan);
+    if (STREQ(name, "calibrate")) {
+        status = psl__GainCalibrate(detChan, det, modChan, m, defs, scaleFactor);
+        if (status != XIA_SUCCESS) {
+            pslLog(PSL_LOG_ERROR, status,
+                   "Error doing gain operation '%s' for detChan %d", name, detChan);
+        }
+
+        return status;
     }
 
-    return status;
-  }
-
-  pslLog(PSL_LOG_ERROR, XIA_BAD_NAME,
-         "Unknown gain operation '%s' for detChan %d", name, detChan);
-  return XIA_BAD_NAME;
+    pslLog(PSL_LOG_ERROR, XIA_BAD_NAME,
+           "Unknown gain operation '%s' for detChan %d", name, detChan);
+    return XIA_BAD_NAME;
 }
 
 PSL_STATIC int psl__GetADCTraceLength(Module* module, Detector* detector,
@@ -1273,7 +1251,7 @@ PSL_STATIC int psl__GetADCTrace(Module* module, Detector* detector, void* buffer
     if (status != XIA_SUCCESS) {
         pslLog(PSL_LOG_ERROR, status,
                "Unable to set the oscilloscope run mode");
-            return status;
+        return status;
     }
 
     SincEncodeStartOscilloscope(&packet, psl__DetectorChannel(detector));
@@ -1325,8 +1303,8 @@ PSL_STATIC int psl__GetADCTrace(Module* module, Detector* detector, void* buffer
         /* Convert signed values into our unsigned range. adcTrace
          * minRange/maxRange are typically -0x10000/2 - 1 to 0x10000
          */
-      *out++ =
-        (unsigned int) (*in++) - (unsigned int) fDetector->adcTrace.minRange;
+        *out++ =
+            (unsigned int) (*in++) - (unsigned int) fDetector->adcTrace.minRange;
     }
 
     free(fDetector->adcTrace.data);
@@ -1422,7 +1400,7 @@ PSL_STATIC int psl__SetAcquisitionValues(int        detChan,
 
     double dvalue = *((double*) value);
 
-    AcquisitionValue* acq;
+    const AcquisitionValue* acq;
 
     ASSERT(detector);
     ASSERT(detector->pslData);
@@ -1436,7 +1414,7 @@ PSL_STATIC int psl__SetAcquisitionValues(int        detChan,
            "%s (%d/%u): %s -> %0.3f.",
            module->alias, fDetector->modDetChan, detChan, name, dvalue);
 
-    acq = psl__GetAcquisition(fDetector, name);
+    acq = psl__GetAcquisition(name);
 
     if (acq) {
         int status;
@@ -1456,7 +1434,7 @@ PSL_STATIC int psl__SetAcquisitionValues(int        detChan,
 
         /* Validate the value and send it to the board */
         status = acq->handler(module, detector, fDetector->modDetChan,
-                              fDetector, defaults, acq, name, &dvalue, FALSE_);
+                              fDetector, defaults, name, &dvalue, FALSE_);
 
         if (status != XIA_SUCCESS) {
             pslLog(PSL_LOG_ERROR, status,
@@ -1464,17 +1442,8 @@ PSL_STATIC int psl__SetAcquisitionValues(int        detChan,
             return status;
         }
 
-        /* Sync the new (possibly coerced) value into the PSL acq copy */
-        status = psl__SetAcqValue(acq, dvalue);
-        if (status != XIA_SUCCESS) {
-            pslLog(PSL_LOG_ERROR, status,
-                   "Error syncing acq value for acquisition value handler: %s",
-                   name);
-            return status;
-        }
-
         /* Sync the new value to the Handel defaults, so save system sees it */
-        status = psl__UpdateDefault(defaults, name, acq);
+        status = psl__UpdateDefault(defaults, name, dvalue);
         if (status != XIA_SUCCESS) {
             pslLog(PSL_LOG_ERROR, status,
                    "Error updating default for acquisition value handler: %s",
@@ -1504,7 +1473,7 @@ PSL_STATIC int psl__GetAcquisitionValues(int        detChan,
     int status;
     XiaDefaults *defaults = NULL;
     FalconXNDetector* fDetector = NULL;
-    AcquisitionValue* acq;
+    const AcquisitionValue* acq;
 
     double dvalue = 0;
 
@@ -1531,7 +1500,7 @@ PSL_STATIC int psl__GetAcquisitionValues(int        detChan,
         return status;
     }
 
-    acq = psl__GetAcquisition(fDetector, name);
+    acq = psl__GetAcquisition(name);
 
     if (!acq) {
         status = XIA_NOT_FOUND;
@@ -1546,8 +1515,8 @@ PSL_STATIC int psl__GetAcquisitionValues(int        detChan,
      * This could potentially retrieve the previous default value. The getter
      * can be left blank if a refresh from the device is not needed.
      */
-    if (PSL_ACQ_FLAG_SET(acq, PSL_ACQ_HAS_DEFAULT)) {
-        status = pslGetDefault(name, value, defaults);
+    if (!PSL_ACQ_FLAG_SET(acq, PSL_ACQ_READ_ONLY)) {
+        status = pslGetDefault(name, &dvalue, defaults);
 
         if ((status != XIA_SUCCESS) && (status != XIA_NOT_FOUND)) {
             pslLog(PSL_LOG_ERROR, status,
@@ -1560,7 +1529,7 @@ PSL_STATIC int psl__GetAcquisitionValues(int        detChan,
 
     /* Get the value from the board */
     status = acq->handler(module, detector, fDetector->modDetChan,
-                          fDetector, defaults, acq, name, &dvalue, TRUE_);
+                          fDetector, defaults, name, &dvalue, TRUE_);
 
     if (status != XIA_SUCCESS) {
         pslLog(PSL_LOG_ERROR, status,
@@ -1575,12 +1544,14 @@ PSL_STATIC int psl__GetAcquisitionValues(int        detChan,
      * values that we refresh that may have been updated by the box and
      * not the user (e.g. during characterization).
      */
-    status = psl__UpdateDefault(defaults, name, acq);
-    if (status != XIA_SUCCESS) {
-        pslLog(PSL_LOG_ERROR, status,
-               "Error updating default for acquisition value handler: %s",
-               acq->name);
-        return status;
+    if (!PSL_ACQ_FLAG_SET(acq, PSL_ACQ_READ_ONLY)) {
+        status = psl__UpdateDefault(defaults, name, dvalue);
+        if (status != XIA_SUCCESS) {
+            pslLog(PSL_LOG_ERROR, status,
+                   "Error updating default for acquisition value handler: %s",
+                   acq->name);
+            return status;
+        }
     }
 
     return XIA_SUCCESS;
@@ -1617,8 +1588,7 @@ ACQ_HANDLER_DECL(analog_gain)
 
         if (kv->has_paramtype &&
             (kv->paramtype == SI_TORO__SINC__KEY_VALUE__PARAM_TYPE__FLOAT_TYPE)) {
-            acq->value.ref.f = pow(16.0, (kv->floatval - 409.6) / (8.0 * 409.6));
-            *value = acq->value.ref.f;
+            *value = pow(16.0, (kv->floatval - 409.6) / (8.0 * 409.6));
         } else {
             status = XIA_BAD_VALUE;
         }
@@ -1689,8 +1659,7 @@ ACQ_HANDLER_DECL(analog_offset)
         kv = resp->results[0];
 
         if (kv->has_floatval) {
-            acq->value.ref.f = kv->floatval + DAC_OFFSET_MIN;
-            *value = acq->value.ref.f;
+            *value =  kv->floatval + DAC_OFFSET_MIN;
         } else {
             status = XIA_BAD_VALUE;
         }
@@ -1708,8 +1677,8 @@ ACQ_HANDLER_DECL(analog_offset)
 
         if (*value < DAC_OFFSET_MIN || DAC_OFFSET_MAX < *value) {
             pslLog(PSL_LOG_ERROR, XIA_DAC_GAIN_OOR,
-                "DAC gain value of %0.3f is outside acceptable range of [1,16]",
-                *value);
+                   "DAC gain value of %0.3f is outside acceptable range of [1,16]",
+                   *value);
             return XIA_DAC_GAIN_OOR;
         }
 
@@ -1753,9 +1722,8 @@ ACQ_HANDLER_DECL(detector_polarity)
         kv = resp->results[0];
 
         if (kv->has_boolval) {
-           /* inverted bool value between Handel and SINC semantics */
-            acq->value.ref.b = !PSL_BOOL_OF_KV(kv);
-            *value = PSL_ACQ_GET_BOOL(acq);
+            /* inverted bool value between Handel and SINC semantics */
+            *value = !PSL_BOOL_OF_BOOLVAL(kv->boolval);
         } else {
             status = XIA_BAD_VALUE;
         }
@@ -1774,7 +1742,7 @@ ACQ_HANDLER_DECL(detector_polarity)
         si_toro__sinc__key_value__init(&kv);
         kv.key = (char*) "afe.invert";
         kv.has_boolval = TRUE_;
-         /* inverted bool value between Handel and SINC semantics */
+        /* inverted bool value between Handel and SINC semantics */
         kv.boolval = *value == 0.0 ? TRUE_ : FALSE_;
 
         status = psl__SetParam(module, detector, &kv);
@@ -1843,14 +1811,12 @@ ACQ_HANDLER_DECL(termination)
         if (kv->has_paramtype &&
             (kv->paramtype == SI_TORO__SINC__KEY_VALUE__PARAM_TYPE__OPTION_TYPE)) {
             if (STREQ(kv->optionval, "1kohm"))
-                acq->value.ref.i = 0;
+                *value = 0;
             else if (STREQ(kv->optionval, "50ohm"))
-                acq->value.ref.i = 1;
+                *value = 1;
             else {
                 status = XIA_BAD_VALUE;
             }
-            if (status == XIA_SUCCESS)
-                *value = (double) acq->value.ref.i;
         } else {
             status = XIA_BAD_VALUE;
         }
@@ -1869,9 +1835,9 @@ ACQ_HANDLER_DECL(termination)
         si_toro__sinc__key_value__init(&kv);
         kv.key = (char*) "afe.termination";
         if (*value == 0.0)
-          kv.optionval = (char*) "1kohm";
+            kv.optionval = (char*) "1kohm";
         else if (*value == 1.0)
-          kv.optionval = (char*) "50ohm";
+            kv.optionval = (char*) "50ohm";
         else {
             status = XIA_BAD_VALUE;
             pslLog(PSL_LOG_ERROR, status,
@@ -1916,16 +1882,14 @@ ACQ_HANDLER_DECL(attenuation)
         if (kv->has_paramtype &&
             (kv->paramtype == SI_TORO__SINC__KEY_VALUE__PARAM_TYPE__OPTION_TYPE)) {
             if (STREQ(kv->optionval, "0dB"))
-                acq->value.ref.i = 0;
+                *value = 0;
             else if (STREQ(kv->optionval, "-6dB"))
-                acq->value.ref.i = 1;
+                *value = 1;
             else if (STREQ(kv->optionval, "ground"))
-                acq->value.ref.i = 2;
+                *value = 2;
             else {
                 status = XIA_BAD_VALUE;
             }
-            if (status == XIA_SUCCESS)
-                *value = (double) acq->value.ref.i;
         } else {
             status = XIA_BAD_VALUE;
         }
@@ -1944,11 +1908,11 @@ ACQ_HANDLER_DECL(attenuation)
         si_toro__sinc__key_value__init(&kv);
         kv.key = (char*) "afe.attn";
         if (*value == 0.0)
-          kv.optionval = (char*) "0dB";
+            kv.optionval = (char*) "0dB";
         else if (*value == 1.0)
-          kv.optionval = (char*) "-6dB";
+            kv.optionval = (char*) "-6dB";
         else if (*value == 2.0)
-          kv.optionval = (char*) "ground";
+            kv.optionval = (char*) "ground";
         else {
             status = XIA_BAD_VALUE;
             pslLog(PSL_LOG_ERROR, status,
@@ -1993,14 +1957,12 @@ ACQ_HANDLER_DECL(coupling)
         if (kv->has_paramtype &&
             (kv->paramtype == SI_TORO__SINC__KEY_VALUE__PARAM_TYPE__OPTION_TYPE)) {
             if (STREQ(kv->optionval, "ac"))
-                acq->value.ref.i = 0;
+                *value = 0;
             else if (STREQ(kv->optionval, "dc"))
-                acq->value.ref.i = 1;
+                *value = 1;
             else {
                 status = XIA_BAD_VALUE;
             }
-            if (status == XIA_SUCCESS)
-                *value = (double) acq->value.ref.i;
         } else {
             status = XIA_BAD_VALUE;
         }
@@ -2019,9 +1981,9 @@ ACQ_HANDLER_DECL(coupling)
         si_toro__sinc__key_value__init(&kv);
         kv.key = (char*) "afe.coupling";
         if (*value == 0.0)
-          kv.optionval = (char*) "ac";
+            kv.optionval = (char*) "ac";
         else if (*value == 1.0)
-          kv.optionval = (char*) "dc";
+            kv.optionval = (char*) "dc";
         else {
             status = XIA_BAD_VALUE;
             pslLog(PSL_LOG_ERROR, status,
@@ -2066,18 +2028,16 @@ ACQ_HANDLER_DECL(decay_time)
         if (kv->has_paramtype &&
             (kv->paramtype == SI_TORO__SINC__KEY_VALUE__PARAM_TYPE__OPTION_TYPE)) {
             if (STREQ(kv->optionval, "long"))
-                acq->value.ref.i = (int64_t)XIA_DECAY_LONG;
+                *value = XIA_DECAY_LONG;
             else if (STREQ(kv->optionval, "medium"))
-                acq->value.ref.i = (int64_t)XIA_DECAY_MEDIUM;
+                *value = XIA_DECAY_MEDIUM;
             else if (STREQ(kv->optionval, "short"))
-                acq->value.ref.i = (int64_t)XIA_DECAY_SHORT;
+                *value = XIA_DECAY_SHORT;
             else if (STREQ(kv->optionval, "very-short"))
-                acq->value.ref.i = (int64_t)XIA_DECAY_VERY_SHORT;
+                *value = XIA_DECAY_VERY_SHORT;
             else {
                 status = XIA_BAD_VALUE;
             }
-            if (status == XIA_SUCCESS)
-                *value = (double) acq->value.ref.i;
         } else {
             status = XIA_BAD_VALUE;
         }
@@ -2096,13 +2056,13 @@ ACQ_HANDLER_DECL(decay_time)
         si_toro__sinc__key_value__init(&kv);
         kv.key = (char*) "afe.decayTime";
         if (*value == XIA_DECAY_LONG)
-          kv.optionval = (char*) "long";
+            kv.optionval = (char*) "long";
         else if (*value == XIA_DECAY_MEDIUM)
-          kv.optionval = (char*) "medium";
+            kv.optionval = (char*) "medium";
         else if (*value == XIA_DECAY_SHORT)
-          kv.optionval = (char*) "short";
+            kv.optionval = (char*) "short";
         else if (*value == XIA_DECAY_VERY_SHORT)
-          kv.optionval = (char*) "very-short";
+            kv.optionval = (char*) "very-short";
         else {
             status = XIA_BAD_VALUE;
             pslLog(PSL_LOG_ERROR, status,
@@ -2142,7 +2102,7 @@ ACQ_HANDLER_DECL(dc_offset)
             return status;
         }
 
-        acq->value.ref.f = *value = sincVal.floatval;
+        *value = sincVal.floatval;
     }
     else {
         SiToro__Sinc__KeyValue kv;
@@ -2184,8 +2144,7 @@ ACQ_HANDLER_DECL(reset_blanking_enable)
             return status;
         }
 
-        acq->value.ref.b = sincVal.boolval;
-        *value = PSL_ACQ_GET_BOOL(acq);
+        *value = PSL_BOOL_OF_BOOLVAL(sincVal.boolval);
     }
     else {
         SiToro__Sinc__KeyValue kv;
@@ -2227,7 +2186,7 @@ ACQ_HANDLER_DECL(reset_blanking_threshold)
             return status;
         }
 
-        acq->value.ref.f = *value = sincVal.floatval;
+        *value = sincVal.floatval;
     }
     else {
         SiToro__Sinc__KeyValue kv;
@@ -2269,8 +2228,7 @@ ACQ_HANDLER_DECL(reset_blanking_presamples)
             return status;
         }
 
-        acq->value.ref.i = sincVal.intval;
-        *value = (double) acq->value.ref.i;
+        *value = (double) sincVal.intval;
     }
     else {
         SiToro__Sinc__KeyValue kv;
@@ -2312,8 +2270,7 @@ ACQ_HANDLER_DECL(reset_blanking_postsamples)
             return status;
         }
 
-        acq->value.ref.i = sincVal.intval;
-        *value = (double) acq->value.ref.i;
+        *value = (double) sincVal.intval;
     }
     else {
         SiToro__Sinc__KeyValue kv;
@@ -2355,7 +2312,7 @@ ACQ_HANDLER_DECL(detection_threshold)
             return status;
         }
 
-        acq->value.ref.f = *value = sincVal.floatval;
+        *value = sincVal.floatval;
     }
     else {
         SiToro__Sinc__KeyValue kv;
@@ -2397,8 +2354,7 @@ ACQ_HANDLER_DECL(min_pulse_pair_separation)
             return status;
         }
 
-        acq->value.ref.i = sincVal.intval;
-        *value = (double) acq->value.ref.i;
+        *value = (double) sincVal.intval;
     }
     else {
         SiToro__Sinc__KeyValue kv;
@@ -2444,20 +2400,18 @@ ACQ_HANDLER_DECL(detection_filter)
         if (kv->has_paramtype &&
             (kv->paramtype == SI_TORO__SINC__KEY_VALUE__PARAM_TYPE__OPTION_TYPE)) {
             if (STREQ(kv->optionval, "lowEnergy"))
-                acq->value.ref.i = XIA_FILTER_LOW_ENERGY;
+                *value = XIA_FILTER_LOW_ENERGY;
             else if (STREQ(kv->optionval, "lowRate"))
-                acq->value.ref.i = XIA_FILTER_LOW_RATE;
+                *value = XIA_FILTER_LOW_RATE;
             else if (STREQ(kv->optionval, "midRate"))
-                acq->value.ref.i = XIA_FILTER_MID_RATE;
+                *value = XIA_FILTER_MID_RATE;
             else if (STREQ(kv->optionval, "highRate"))
-                acq->value.ref.i = XIA_FILTER_HIGH_RATE;
+                *value = XIA_FILTER_HIGH_RATE;
             else if (STREQ(kv->optionval, "maxThroughput"))
-                acq->value.ref.i = XIA_FILTER_MAX_THROUGHPUT;
+                *value = XIA_FILTER_MAX_THROUGHPUT;
             else {
                 status = XIA_BAD_VALUE;
             }
-            if (status == XIA_SUCCESS)
-                *value = (double) acq->value.ref.i;
         } else {
             status = XIA_BAD_VALUE;
         }
@@ -2524,8 +2478,7 @@ ACQ_HANDLER_DECL(clock_speed)
             return status;
         }
 
-        acq->value.ref.i = sincVal.intval;
-        *value = (double) acq->value.ref.i;
+        *value = (double) sincVal.intval;
     }
     else {
         status = XIA_READ_ONLY;
@@ -2555,8 +2508,7 @@ ACQ_HANDLER_DECL(adc_trace_decimation)
         return status;
     }
 
-    acq->value.ref.i = 2;
-    *value = (double) acq->value.ref.i;
+    *value = 2;
     return XIA_SUCCESS;
 }
 
@@ -2573,14 +2525,10 @@ ACQ_HANDLER_DECL(mapping_mode)
     ACQ_HANDLER_LOG(mapping_mode);
 
     if (read) {
-        *value = (double) acq->value.ref.i;
     }
     else {
-        /*
-         * See PSL__CONVERT_TO.
-         */
-        status = psl__ConvertTo_MM_Mode(acq, *value);
-        if (status != XIA_SUCCESS) {
+        if (*value < MAPPING_MODE_MCA || *value > MAPPING_MODE_COUNT - 1) {
+            status = XIA_ACQ_OOR;
             pslLog(PSL_LOG_ERROR, status,
                    "Invalid mapping_mode: %f", *value);
             return status;
@@ -2600,13 +2548,11 @@ ACQ_HANDLER_DECL(preset_type)
 
     UNUSED(defaults);
     UNUSED(fDetector);
-    UNUSED(acq);
     UNUSED(detector);
 
     ACQ_HANDLER_LOG(preset_type);
 
     if (read) {
-        *value = (double) acq->value.ref.i;
     }
     else {
         if (*value == XIA_PRESET_NONE)
@@ -2632,6 +2578,7 @@ ACQ_HANDLER_DECL(number_mca_channels)
 {
     int status;
 
+    UNUSED(detector);
     UNUSED(defaults);
     UNUSED(fDetector);
 
@@ -2663,8 +2610,7 @@ ACQ_HANDLER_DECL(number_mca_channels)
 
         lowIndex = sincVal.intval;
 
-        acq->value.ref.i = highIndex - lowIndex + 1;
-        *value = (double) acq->value.ref.i;
+        *value = (double) highIndex - lowIndex + 1;
     }
     else {
         if (*value > MAX_MCA_CHANNELS || *value < MIN_MCA_CHANNELS) {
@@ -2675,9 +2621,7 @@ ACQ_HANDLER_DECL(number_mca_channels)
             return status;
         }
 
-        acq->value.ref.i = (int64_t) *value;
-
-        status = psl__SyncNumberMCAChannels(module, detector);
+        status = psl__SyncNumberMCAChannels(module, detector, (int64_t) *value, -1);
         if (status != XIA_SUCCESS) {
             pslLog(PSL_LOG_ERROR, status,
                    "Unable to sync bin sub region to set number_mca_channels");
@@ -2710,8 +2654,7 @@ ACQ_HANDLER_DECL(mca_spectrum_accepted)
             return status;
         }
 
-        acq->value.ref.b = sincVal.boolval;
-        *value = PSL_ACQ_GET_BOOL(acq);
+        *value = PSL_BOOL_OF_BOOLVAL(sincVal.boolval);
     }
     else {
         SiToro__Sinc__KeyValue kv;
@@ -2754,8 +2697,7 @@ ACQ_HANDLER_DECL(mca_spectrum_rejected)
             return status;
         }
 
-        acq->value.ref.b = sincVal.boolval;
-        *value = PSL_ACQ_GET_BOOL(acq);
+        *value = PSL_BOOL_OF_BOOLVAL(sincVal.boolval);
     }
     else {
         SiToro__Sinc__KeyValue kv;
@@ -2798,8 +2740,7 @@ ACQ_HANDLER_DECL(mca_start_channel)
             return status;
         }
 
-        acq->value.ref.i = sincVal.intval;
-        *value = (double) acq->value.ref.i;
+        *value = (double) sincVal.intval;
     }
     else {
         SiToro__Sinc__KeyValue kv;
@@ -2816,9 +2757,7 @@ ACQ_HANDLER_DECL(mca_start_channel)
             return status;
         }
 
-        acq->value.ref.i = (int64_t)*value;
-
-        status = psl__SyncNumberMCAChannels(module, detector);
+        status = psl__SyncNumberMCAChannels(module, detector, -1, kv.intval);
         if (status != XIA_SUCCESS) {
             pslLog(PSL_LOG_ERROR, status,
                    "Unable to sync bin sub region for setting mca_start_channel");
@@ -2839,8 +2778,7 @@ ACQ_HANDLER_DECL(mca_refresh)
     ACQ_HANDLER_LOG(mca_refresh);
 
     if (read) {
-        /* Return the cached value; the value on the box may be garbage for mm1. */
-        *value = acq->value.ref.f;
+        /* Return the default; the value on the box may be garbage for mm1. */
     }
     else {
         /* Set to the box for validation. */
@@ -2858,22 +2796,20 @@ ACQ_HANDLER_DECL(mca_refresh)
 ACQ_HANDLER_DECL(preset_value)
 {
     int status;
-    AcquisitionValue *preset_type;
+    acqValue preset_type;
     char *param;
     boolean_t useIntVal = TRUE_;
 
     UNUSED(defaults);
-    UNUSED(acq);
 
     ACQ_HANDLER_LOG(preset_value);
 
-    preset_type = psl__GetAcquisition(fDetector, "preset_type");
-    ASSERT(preset_type);
+    preset_type = psl__GetAcqValue(fDetector, "preset_type");
 
     pslLog(PSL_LOG_DEBUG, "%s:%d preset type:%d",
-           module->alias, channel, (int) preset_type->value.ref.i);
+           module->alias, channel, (int) preset_type.ref.i);
 
-    switch (preset_type->value.ref.i) {
+    switch (preset_type.ref.i) {
     case (int)XIA_PRESET_NONE:
     case (int)XIA_PRESET_FIXED_REAL:
         param = (char*) "histogram.fixedTime.duration";
@@ -2960,7 +2896,6 @@ ACQ_HANDLER_DECL(scale_factor)
     ACQ_HANDLER_LOG(scale_factor);
 
     if (read) {
-        *value = acq->value.ref.f;
     }
     else {
         SiToro__Sinc__KeyValue kv;
@@ -3018,14 +2953,13 @@ ACQ_HANDLER_DECL(mca_bin_width)
     UNUSED(defaults);
     UNUSED(fDetector);
     UNUSED(detector);
+    UNUSED(value);
 
     ACQ_HANDLER_LOG(mca_bin_width);
 
     if (read) {
-        *value = acq->value.ref.f;
     }
     else {
-        acq->value.ref.f = *value;
     }
 
     return XIA_SUCCESS;
@@ -3057,19 +2991,20 @@ ACQ_HANDLER_DECL(sca_trigger_mode)
 
         if (kv->has_paramtype &&
             (kv->paramtype == SI_TORO__SINC__KEY_VALUE__PARAM_TYPE__OPTION_TYPE)) {
+            int64_t i = 0;
             if (STREQ(kv->optionval, "off"))
-                acq->value.ref.i = SCA_TRIGGER_OFF;
+                i = SCA_TRIGGER_OFF;
             else if (STREQ(kv->optionval, "whenHigh"))
-                acq->value.ref.i = SCA_TRIGGER_HIGH;
+                i = SCA_TRIGGER_HIGH;
             else if (STREQ(kv->optionval, "whenLow"))
-                acq->value.ref.i = SCA_TRIGGER_LOW;
+                i = SCA_TRIGGER_LOW;
             else if (STREQ(kv->optionval, "always"))
-                acq->value.ref.i = SCA_TRIGGER_ALWAYS;
+                i = SCA_TRIGGER_ALWAYS;
             else {
                 status = XIA_BAD_VALUE;
             }
             if (status == XIA_SUCCESS)
-                *value = (double) acq->value.ref.i;
+                *value = (double) i;
         } else {
             status = XIA_BAD_VALUE;
         }
@@ -3078,7 +3013,7 @@ ACQ_HANDLER_DECL(sca_trigger_mode)
 
         if (status != XIA_SUCCESS) {
             pslLog(PSL_LOG_ERROR, status,
-                  "Unable to parse sca generationTrigger response");
+                   "Unable to parse sca generationTrigger response");
             return status;
         }
     }
@@ -3105,7 +3040,7 @@ ACQ_HANDLER_DECL(sca_trigger_mode)
         status = psl__SetParam(module, detector, &kv);
         if (status != XIA_SUCCESS) {
             pslLog(PSL_LOG_ERROR, status,
-                  "Unable to set the sca generationTrigger");
+                   "Unable to set the sca generationTrigger");
             return status;
         }
     }
@@ -3136,8 +3071,7 @@ ACQ_HANDLER_DECL(sca_pulse_duration)
             return status;
         }
 
-        acq->value.ref.i = sincVal.intval;
-        *value = (double) acq->value.ref.i;
+        *value = (double) sincVal.intval;
     }
     else {
         SiToro__Sinc__KeyValue kv;
@@ -3171,27 +3105,24 @@ ACQ_HANDLER_DECL(number_of_scas)
     ACQ_HANDLER_LOG(number_of_scas);
 
     if (read) {
-      *value = (double) acq->value.ref.i;
     }
     else {
-      psl__GetMaxNumberSca(channel, module, &max_number_of_scas);
+        psl__GetMaxNumberSca(channel, module, &max_number_of_scas);
 
-      if (number_of_scas > max_number_of_scas) {
-          status = XIA_INVALID_VALUE;
-          pslLog(PSL_LOG_ERROR, status,
-                 "number of sca %d greater than maximum allowed (%d).",
-                 number_of_scas, max_number_of_scas);
-          return status;
-      }
+        if (number_of_scas > max_number_of_scas) {
+            status = XIA_INVALID_VALUE;
+            pslLog(PSL_LOG_ERROR, status,
+                   "number of sca %d greater than maximum allowed (%d).",
+                   number_of_scas, max_number_of_scas);
+            return status;
+        }
 
-      status = pslSetNumberSCAs(module, defaults, channel, number_of_scas);
+        status = pslSetNumberSCAs(module, defaults, channel, number_of_scas);
 
-      if (status != XIA_SUCCESS) {
-          pslLog(PSL_LOG_ERROR, status, "Unable to set the number of sca");
-          return status;
-      }
-
-      acq->value.ref.i = number_of_scas;
+        if (status != XIA_SUCCESS) {
+            pslLog(PSL_LOG_ERROR, status, "Unable to set the number of sca");
+            return status;
+        }
     }
 
     return status;
@@ -3205,12 +3136,11 @@ ACQ_HANDLER_DECL(sca)
 
     char limit[9];
 
-    AcquisitionValue * number_of_scas;
+    acqValue number_of_scas;
 
     UNUSED(defaults);
     UNUSED(channel);
     UNUSED(detector);
-    UNUSED(acq);
 
     ACQ_HANDLER_LOG(sca);
 
@@ -3220,36 +3150,27 @@ ACQ_HANDLER_DECL(sca)
 
     /* If an unexpected acq name is requested treat it as a not found error */
     if (!(STREQ(limit, "lo") || STREQ(limit, "hi"))) {
-          pslLog(PSL_LOG_ERROR, XIA_NOT_FOUND, "Unexpected acqusition name "
-            "string '%s'", name);
-      return XIA_NOT_FOUND;
+        pslLog(PSL_LOG_ERROR, XIA_NOT_FOUND, "Unexpected acquisition name "
+               "string '%s'", name);
+        return XIA_NOT_FOUND;
     }
 
-    number_of_scas = psl__GetAcquisition(fDetector, "number_of_scas");
-    ASSERT(number_of_scas);
+    number_of_scas = psl__GetAcqValue(fDetector, "number_of_scas");
 
-    if (scaNum >= number_of_scas->value.ref.i) {
-      pslLog(PSL_LOG_ERROR, XIA_SCA_OOR, "Requested SCA number '%" PRIu16 "' is larger"
-            " than the number of SCAs (%" PRIu64 ") for channel %u",
-              scaNum, number_of_scas->value.ref.i, channel);
-      return XIA_SCA_OOR;
+    if (scaNum >= number_of_scas.ref.i) {
+        pslLog(PSL_LOG_ERROR, XIA_SCA_OOR, "Requested SCA number '%" PRIu16 "' is larger"
+               " than the number of SCAs (%" PRIu64 ") for channel %u",
+               scaNum, number_of_scas.ref.i, channel);
+        return XIA_SCA_OOR;
     }
 
     if (read) {
-        /* Since we can't put it all in the acq storage, the sca limit values
-         * rely on the defaults data structure */
-        status = pslGetDefault(name, value, defaults);
-
-        if (status != XIA_SUCCESS) {
-            pslLog(PSL_LOG_ERROR, status,"Unable to get the value of '%s' for "
-                   "detChan %d.", name, channel);
-            return status;
-        }
+        /* Just return the default. */
     }
     else {
         char keyname[24];
 
-        /* NOTE that the sinc indexing is 1-based */
+        /* Convert Handel 0-based indexing to sinc 1-based. */
         snprintf(keyname, sizeof(keyname),
                  "sca.region_%02" PRIu16 ".%s", scaNum + 1,
                  STREQ(limit, "lo") ? "startBin" : "endBin");
@@ -3282,7 +3203,6 @@ ACQ_HANDLER_DECL(num_map_pixels)
     ACQ_HANDLER_LOG(num_map_pixels);
 
     if (read) {
-        *value = (double) acq->value.ref.i;
     }
     else {
         /* The upper limit is constrained only by downstream mm code and
@@ -3291,7 +3211,6 @@ ACQ_HANDLER_DECL(num_map_pixels)
         int64_t max = 1ull << 32;
         if ((*value < 0) || (*value > max))
             return XIA_ACQ_OOR;
-        acq->value.ref.i = (int64_t) *value;
     }
 
     return status;
@@ -3308,7 +3227,6 @@ ACQ_HANDLER_DECL(num_map_pixels_per_buffer)
     ACQ_HANDLER_LOG(num_map_pixels_per_buffer);
 
     if (read) {
-        *value = (double) acq->value.ref.i;
     }
     else {
         /* Allow special values -1.0 or 0.0 for XMAP compatibility. Both
@@ -3343,12 +3261,10 @@ ACQ_HANDLER_DECL(pixel_advance_mode)
     ACQ_HANDLER_LOG(pixel_advance_mode);
 
     if (read) {
-        *value = (double) acq->value.ref.i;
     }
     else {
         if ((*value < 0) || (*value > XIA_MAPPING_CTL_GATE))
             return XIA_UNKNOWN_PT_CTL;
-        acq->value.ref.i = (int64_t) *value;
     }
 
     return status;
@@ -3365,14 +3281,11 @@ ACQ_HANDLER_DECL(input_logic_polarity)
     ACQ_HANDLER_LOG(input_logic_polarity);
 
     if (read) {
-        *value = (double) acq->value.ref.i;
     }
     else {
         if (*value != (double) XIA_GATE_COLLECT_HI &&
             *value != (double) XIA_GATE_COLLECT_LO)
             return XIA_ACQ_OOR;
-
-        acq->value.ref.i = (int64_t) *value;
     }
 
     return status;
@@ -3392,12 +3305,10 @@ ACQ_HANDLER_DECL(gate_ignore)
     ACQ_HANDLER_LOG(gate_ignore);
 
     if (read) {
-        *value = (double) acq->value.ref.i;
     }
     else {
         if ((*value != 0.0) && (*value != 1.0))
             return XIA_TYPEVAL_OOR;
-        acq->value.ref.i = (int64_t) *value;
     }
 
     return status;
@@ -3410,14 +3321,13 @@ ACQ_HANDLER_DECL(sync_count)
     UNUSED(detector);
     UNUSED(fDetector);
     UNUSED(defaults);
+    UNUSED(value);
 
     ACQ_HANDLER_LOG(sync_count);
 
     if (read) {
-        *value = (double) acq->value.ref.i;
     }
     else {
-        acq->value.ref.i = (int64_t) *value;
     }
 
     return status;
@@ -3457,7 +3367,7 @@ PSL_STATIC int psl__GainCalibrate(int detChan, Detector *det, int modChan,
                                   Module *m, XiaDefaults *def, double *delta)
 {
     int status = XIA_SUCCESS;
-    AcquisitionValue *scale_factor;
+    acqValue scale_factor;
     double newScale;
     FalconXNDetector *fDetector;
 
@@ -3470,13 +3380,12 @@ PSL_STATIC int psl__GainCalibrate(int detChan, Detector *det, int modChan,
 
     fDetector = det->pslData;
 
-    scale_factor = psl__GetAcquisition(fDetector, "scale_factor");
-    ASSERT(scale_factor);
+    scale_factor = psl__GetAcqValue(fDetector, "scale_factor");
 
     pslLog(PSL_LOG_DEBUG, "Scaling scale_factor %f by gain delta %f",
-           scale_factor->value.ref.f, *delta);
+           scale_factor.ref.f, *delta);
 
-    newScale = *delta * scale_factor->value.ref.f;
+    newScale = *delta * scale_factor.ref.f;
 
     status = psl__SetAcquisitionValues(detChan, det, m,
                                        "scale_factor", &newScale);
@@ -3694,7 +3603,7 @@ PSL_STATIC int psl__Start_MappingMode_0(unsigned short resume,
         FalconXNDetector* fDetector;
         uint32_t          number_stats;
 
-        AcquisitionValue* number_mca_channels;
+        acqValue number_mca_channels;
 
         chanDetector = psl__FindDetector(module, channel);
         if (chanDetector == NULL) {
@@ -3730,10 +3639,8 @@ PSL_STATIC int psl__Start_MappingMode_0(unsigned short resume,
 
         fDetector = chanDetector->pslData;
 
-        number_mca_channels = psl__GetAcquisition(fDetector,
-                                                  "number_mca_channels");
+        number_mca_channels = psl__GetAcqValue(fDetector, "number_mca_channels");
 
-        ASSERT(number_mca_channels);
         size_t sincstats_size = sizeof(SincHistogramCountStats);
 
         if ((sincstats_size % sizeof(uint32_t)) != 0) {
@@ -3764,7 +3671,7 @@ PSL_STATIC int psl__Start_MappingMode_0(unsigned short resume,
         }
 
         status = psl__MappingModeControl_OpenMM0(&fDetector->mmc,
-                                                 (uint16_t)number_mca_channels->value.ref.i,
+                                                 (uint16_t)number_mca_channels.ref.i,
                                                  number_stats);
 
         if (status != XIA_SUCCESS) {
@@ -3835,7 +3742,7 @@ PSL_STATIC int psl__Start_MappingMode_1(unsigned short resume,
                                         Module* module, Detector* detector)
 {
     int status = XIA_SUCCESS;
-     int channel;
+    int channel;
 
     UNUSED(resume);
     UNUSED(detector);
@@ -3851,10 +3758,10 @@ PSL_STATIC int psl__Start_MappingMode_1(unsigned short resume,
         Detector*         chanDetector;
         FalconXNDetector* fDetector;
 
-        AcquisitionValue* number_mca_channels;
-        AcquisitionValue* num_map_pixels;
-        AcquisitionValue* num_map_pixels_per_buffer;
-        AcquisitionValue* pixel_advance_mode;
+        acqValue number_mca_channels;
+        acqValue num_map_pixels;
+        acqValue num_map_pixels_per_buffer;
+        acqValue pixel_advance_mode;
 
         chanDetector = psl__FindDetector(module, channel);
         if (chanDetector == NULL) {
@@ -3880,18 +3787,12 @@ PSL_STATIC int psl__Start_MappingMode_1(unsigned short resume,
 
         fDetector = chanDetector->pslData;
 
-        number_mca_channels = psl__GetAcquisition(fDetector,
-                                                  "number_mca_channels");
-        num_map_pixels = psl__GetAcquisition(fDetector,
-                                             "num_map_pixels");
-        num_map_pixels_per_buffer = psl__GetAcquisition(fDetector,
-                                                        "num_map_pixels_per_buffer");
-        pixel_advance_mode = psl__GetAcquisition(fDetector, "pixel_advance_mode");
+        number_mca_channels = psl__GetAcqValue(fDetector, "number_mca_channels");
+        num_map_pixels = psl__GetAcqValue(fDetector, "num_map_pixels");
+        num_map_pixels_per_buffer = psl__GetAcqValue(fDetector,
+                                                     "num_map_pixels_per_buffer");
+        pixel_advance_mode = psl__GetAcqValue(fDetector, "pixel_advance_mode");
 
-        ASSERT(number_mca_channels);
-        ASSERT(num_map_pixels);
-        ASSERT(num_map_pixels_per_buffer);
-        ASSERT(pixel_advance_mode);
 
         /*
          * Set a large histogram refresh period for GATE/SYNC advance
@@ -3899,7 +3800,7 @@ PSL_STATIC int psl__Start_MappingMode_1(unsigned short resume,
          * enables the receive loop to assume all histograms are for
          * GATE transitions.
          */
-        if (pixel_advance_mode->value.ref.i == XIA_MAPPING_CTL_USER)
+        if (pixel_advance_mode.ref.i == XIA_MAPPING_CTL_USER)
             status = psl__SyncMCARefresh(module, chanDetector);
         else
             status = psl__SetMCARefresh(module, chanDetector, 999);
@@ -3916,7 +3817,7 @@ PSL_STATIC int psl__Start_MappingMode_1(unsigned short resume,
          * Translate input_logic_polarity/gate_ignore to the SINC gate
          * collection mode.
          */
-        if (pixel_advance_mode->value.ref.i == XIA_MAPPING_CTL_GATE) {
+        if (pixel_advance_mode.ref.i == XIA_MAPPING_CTL_GATE) {
             status = psl__SyncGateCollectionMode(module, chanDetector);
 
             if (status != XIA_SUCCESS) {
@@ -3948,9 +3849,9 @@ PSL_STATIC int psl__Start_MappingMode_1(unsigned short resume,
                                                  fDetector->detChan,
                                                  FALSE_,
                                                  fDetector->runNumber,
-                                                 num_map_pixels->value.ref.i,
-                                                 (uint16_t)number_mca_channels->value.ref.i,
-                                                 num_map_pixels_per_buffer->value.ref.i);
+                                                 num_map_pixels.ref.i,
+                                                 (uint16_t)number_mca_channels.ref.i,
+                                                 num_map_pixels_per_buffer.ref.i);
 
         if (status != XIA_SUCCESS) {
             psl__DetectorUnlock(chanDetector);
@@ -3964,7 +3865,7 @@ PSL_STATIC int psl__Start_MappingMode_1(unsigned short resume,
          * Flag to disable waiting for user pixel advance for GATE or
          * SYNC advance, assuming we only get transitional spectra.
          */
-        if (pixel_advance_mode->value.ref.i != XIA_MAPPING_CTL_USER) {
+        if (pixel_advance_mode.ref.i != XIA_MAPPING_CTL_USER) {
             MMC1_Data*  mm1;
             mm1 = psl__MappingModeControl_MM1Data(&fDetector->mmc);
             mm1->pixelAdvanceCounter = -1;
@@ -3993,30 +3894,29 @@ PSL_STATIC int psl__StartRun(int detChan, unsigned short resume, XiaDefaults *de
 
     FalconXNDetector* fDetector = detector->pslData;
 
-    AcquisitionValue* mapping_mode;
+    acqValue mapping_mode;
 
     xiaPSLBadArgs(module, detector, "psl__StartRun");
 
-    mapping_mode = psl__GetAcquisition(fDetector, "mapping_mode");
+    mapping_mode = psl__GetAcqValue(fDetector, "mapping_mode");
 
-    ASSERT(mapping_mode);
 
     pslLog(PSL_LOG_DEBUG, "Detector:%d Mapping Mode:%d",
-           detChan, (int) mapping_mode->value.ref.i);
+           detChan, (int) mapping_mode.ref.i);
 
-    switch (mapping_mode->value.ref.i)
+    switch (mapping_mode.ref.i)
     {
-        case 0:
-            status = psl__Start_MappingMode_0(resume, module, detector);
-            break;
-        case 1:
-            status = psl__Start_MappingMode_1(resume, module, detector);
-            break;
-        default:
-            status = XIA_INVALID_VALUE;
-            pslLog(PSL_LOG_ERROR, status,
-                   "Invalid mapping_mode: %d", (int) mapping_mode->value.ref.i);
-            return status;
+    case 0:
+        status = psl__Start_MappingMode_0(resume, module, detector);
+        break;
+    case 1:
+        status = psl__Start_MappingMode_1(resume, module, detector);
+        break;
+    default:
+        status = XIA_INVALID_VALUE;
+        pslLog(PSL_LOG_ERROR, status,
+               "Invalid mapping_mode: %d", (int) mapping_mode.ref.i);
+        return status;
     }
 
     if (status == XIA_SUCCESS)
@@ -4029,30 +3929,29 @@ PSL_STATIC int psl__StopRun(int detChan, Detector *detector, Module *module)
 {
     int status = XIA_SUCCESS;
 
-    AcquisitionValue* mapping_mode;
+    acqValue mapping_mode;
 
     FalconXNDetector* fDetector = detector->pslData;
 
     xiaPSLBadArgs(module, detector, "psl__StopRun");
 
-    mapping_mode = psl__GetAcquisition(fDetector, "mapping_mode");
+    mapping_mode = psl__GetAcqValue(fDetector, "mapping_mode");
 
-    ASSERT(mapping_mode);
 
     pslLog(PSL_LOG_DEBUG, "Detector:%d Mapping Mode:%d",
-           detChan, (int) mapping_mode->value.ref.i);
+           detChan, (int) mapping_mode.ref.i);
 
-    switch (mapping_mode->value.ref.i)
+    switch (mapping_mode.ref.i)
     {
-        case 0:
-            return psl__Stop_MappingMode_0(module, detector);
-        case 1:
-            return psl__Stop_MappingMode_1(module, detector);
-        default:
-            status = XIA_INVALID_VALUE;
-            pslLog(PSL_LOG_ERROR, status,
-                   "Invalid mapping_mode: %d", (int) mapping_mode->value.ref.i);
-            return status;
+    case 0:
+        return psl__Stop_MappingMode_0(module, detector);
+    case 1:
+        return psl__Stop_MappingMode_1(module, detector);
+    default:
+        status = XIA_INVALID_VALUE;
+        pslLog(PSL_LOG_ERROR, status,
+               "Invalid mapping_mode: %d", (int) mapping_mode.ref.i);
+        return status;
     }
 }
 
@@ -4079,21 +3978,20 @@ PSL_STATIC int psl__mm0_mca_length(int detChan,
 {
     FalconXNDetector* fDetector = detector->pslData;
 
-    AcquisitionValue* number_mca_channels;
+    acqValue number_mca_channels;
 
     UNUSED(detChan);
     UNUSED(name);
     UNUSED(value);
     UNUSED(module);
 
-    number_mca_channels = psl__GetAcquisition(fDetector, "number_mca_channels");
-    ASSERT(number_mca_channels);
+    number_mca_channels = psl__GetAcqValue(fDetector, "number_mca_channels");
 
     /* Must be in range because we validate parameters in the setters. */
-    ASSERT(0 < number_mca_channels->value.ref.i &&
-           number_mca_channels->value.ref.i < ULONG_MAX);
+    ASSERT(0 < number_mca_channels.ref.i &&
+           number_mca_channels.ref.i < ULONG_MAX);
 
-    *((unsigned long*) value) = (unsigned long) number_mca_channels->value.ref.i;
+    *((unsigned long*) value) = (unsigned long) number_mca_channels.ref.i;
 
     return XIA_SUCCESS;
 }
@@ -4106,8 +4004,8 @@ PSL_STATIC int psl__mm0_mca(int detChan,
 
     FalconXNDetector* fDetector = detector->pslData;
 
-    AcquisitionValue* mca_spectrum_accepted;
-    AcquisitionValue* mca_spectrum_rejected;
+    acqValue mca_spectrum_accepted;
+    acqValue mca_spectrum_rejected;
 
     uint32_t* buffer = value;
 
@@ -4121,11 +4019,9 @@ PSL_STATIC int psl__mm0_mca(int detChan,
     UNUSED(name);
     UNUSED(module);
 
-    mca_spectrum_accepted = psl__GetAcquisition(fDetector, "mca_spectrum_accepted");
-    mca_spectrum_rejected = psl__GetAcquisition(fDetector, "mca_spectrum_rejected");
+    mca_spectrum_accepted = psl__GetAcqValue(fDetector, "mca_spectrum_accepted");
+    mca_spectrum_rejected = psl__GetAcqValue(fDetector, "mca_spectrum_rejected");
 
-    ASSERT(mca_spectrum_accepted);
-    ASSERT(mca_spectrum_rejected);
 
     status = psl__DetectorLock(detector);
     if (status != XIA_SUCCESS) {
@@ -4154,7 +4050,7 @@ PSL_STATIC int psl__mm0_mca(int detChan,
 
     psl__MappingModeBuffers_Active_Reset(&mm0->buffers);
 
-    if (mca_spectrum_accepted->value.ref.b) {
+    if (mca_spectrum_accepted.ref.b) {
         size = mm0->numMCAChannels;
         status = psl__MappingModeBuffers_CopyOut(&mm0->buffers,
                                                  buffer,
@@ -4169,7 +4065,7 @@ PSL_STATIC int psl__mm0_mca(int detChan,
         buffer += mm0->numMCAChannels;
     }
 
-    if (mca_spectrum_rejected->value.ref.b) {
+    if (mca_spectrum_rejected.ref.b) {
         size = mm0->numMCAChannels;
         status = psl__MappingModeBuffers_CopyOut(&mm0->buffers,
                                                  buffer,
@@ -4523,7 +4419,7 @@ PSL_STATIC int psl__GetMaxNumberSca(int detChan, Module* module, int *value)
     psl__SincParamValue sincVal;
 
     status = psl__GetParamValue(module, detChan, "sca.numRegions",
-               SI_TORO__SINC__KEY_VALUE__PARAM_TYPE__INT_TYPE, &sincVal);
+                                SI_TORO__SINC__KEY_VALUE__PARAM_TYPE__INT_TYPE, &sincVal);
     if (status != XIA_SUCCESS) {
         pslLog(PSL_LOG_ERROR, status,
                "Unable to get the maximum number of SCA regions");
@@ -4550,11 +4446,113 @@ PSL_STATIC int psl__SetDigitalConf(int detChan, Detector* detector, Module* modu
     status = psl__SetParam(module, detector, &kv);
     if (status != XIA_SUCCESS) {
         pslLog(PSL_LOG_ERROR, status, "Unable to set instrument.digital.config");
-            return status;
+        return status;
     }
 
 
     return XIA_SUCCESS;
+}
+
+PSL_STATIC int psl__mm0_sca_length(int detChan,
+                                   Detector* detector, Module* module,
+                                   const char *name, void *value)
+{
+    FalconXNDetector* fDetector = detector->pslData;
+    acqValue number_of_scas = psl__GetAcqValue(fDetector, "number_of_scas");
+
+    UNUSED(detChan);
+    UNUSED(module);
+    UNUSED(name);
+
+    *((unsigned short *)value) = (unsigned short)number_of_scas.ref.i;
+
+    return XIA_SUCCESS;
+}
+
+/*
+ * Emulate SCA readout by summing the MCA bins.
+ */
+PSL_STATIC int psl__mm0_sca(int detChan,
+                            Detector* detector, Module* module,
+                            const char *name, void *value)
+{
+    FalconXNDetector* fDetector = detector->pslData;
+    acqValue number_of_scas = psl__GetAcqValue(fDetector, "number_of_scas");
+    acqValue number_mca_channels = psl__GetAcqValue(fDetector,
+                                                    "number_mca_channels");
+    acqValue mca_spectrum_accepted = psl__GetAcqValue(fDetector,
+                                                      "mca_spectrum_accepted");
+    acqValue mca_spectrum_rejected = psl__GetAcqValue(fDetector,
+                                                      "mca_spectrum_rejected");
+
+    unsigned long *mca;
+    size_t bins;
+    double *sca = (double *)value;
+
+    int status;
+    int i;
+
+    UNUSED(module);
+    UNUSED(name);
+
+    if (number_of_scas.ref.i == 0) {
+        pslLog(PSL_LOG_ERROR, XIA_SCA_OOR,
+               "No SCAs defined for detChan %d.", detChan);
+        return XIA_SCA_OOR;
+    }
+
+    if (!mca_spectrum_accepted.ref.b) {
+        pslLog(PSL_LOG_ERROR, XIA_SCA_OOR,
+               "Accepted spectrum is disabled for detChan %d.", detChan);
+        return XIA_NUM_MCA_OOR;
+    }
+
+    bins = (size_t)number_mca_channels.ref.i;
+    if (mca_spectrum_rejected.ref.b) {
+        bins *= 2;
+    }
+
+    /* Allocate for accepted and rejected spectra. */
+    mca = handel_md_alloc(bins * sizeof(unsigned long));
+    if (mca == NULL) {
+        pslLog(PSL_LOG_ERROR, XIA_NOMEM,
+               "No memory for MCA data %"PRId64" ch * 2 for detChan %d.",
+               number_mca_channels.ref.i, detChan);
+        return XIA_NOMEM;
+    }
+
+    status = psl__mm0_mca(detChan, detector, module, "mca", mca);
+    if (status != XIA_SUCCESS) {
+        handel_md_free(mca);
+        pslLog(PSL_LOG_ERROR, status,
+               "Error reading MCA for emulating SCA for detChan %d.", detChan);
+        return status;
+    }
+
+    for (i = 0; i < number_of_scas.ref.i; i++) {
+        char limit[9];
+        int64_t lo, hi;
+
+        sprintf(limit, "sca%d_lo", i);
+        lo = (int64_t)psl__GetAcqValue(fDetector, limit).ref.f;
+
+        sprintf(limit, "sca%d_hi", i);
+        hi = (int64_t)psl__GetAcqValue(fDetector, limit).ref.f;
+
+        sca[i] = 0.0;
+
+        if (lo >= 0 && hi < number_mca_channels.ref.i) {
+            int64_t bin;
+            for (bin = lo; bin < hi; bin++) {
+                sca[i] += mca[bin];
+            }
+        }
+    }
+
+    handel_md_free(mca);
+
+    return XIA_SUCCESS;
+
 }
 
 /*
@@ -4720,8 +4718,8 @@ PSL_STATIC int psl__mm1_buffer_len(int detChan,
 
     FalconXNDetector* fDetector = detector->pslData;
 
-    AcquisitionValue* number_mca_channels;
-    AcquisitionValue* num_map_pixels_per_buffer;
+    acqValue number_mca_channels;
+    acqValue num_map_pixels_per_buffer;
 
     UNUSED(detChan);
     UNUSED(module);
@@ -4736,18 +4734,15 @@ PSL_STATIC int psl__mm1_buffer_len(int detChan,
         return status;
     }
 
-    number_mca_channels = psl__GetAcquisition(fDetector,
-                                              "number_mca_channels");
-    num_map_pixels_per_buffer = psl__GetAcquisition(fDetector,
-                                                    "num_map_pixels_per_buffer");
+    number_mca_channels = psl__GetAcqValue(fDetector, "number_mca_channels");
+    num_map_pixels_per_buffer = psl__GetAcqValue(fDetector,
+                                                 "num_map_pixels_per_buffer");
 
-    ASSERT(number_mca_channels);
-    ASSERT(num_map_pixels_per_buffer);
 
     *((unsigned long*) value)
         = (unsigned long) psl__MappingModeControl_MM1BufferSize(
-                              (uint16_t)number_mca_channels->value.ref.i,
-                              num_map_pixels_per_buffer->value.ref.i);
+                                                                (uint16_t)number_mca_channels.ref.i,
+                                                                num_map_pixels_per_buffer.ref.i);
 
     status = psl__DetectorUnlock(detector);
     if (status != XIA_SUCCESS) {
@@ -5088,124 +5083,132 @@ PSL_STATIC int psl__mm1_mapping_pixel_next(int detChan,
  * order of the labels.
  */
 PSL_STATIC const char* getRunDataLabels[] =
-{
-    "mca_length",
-    "mca",
-    "baseline_length",
-    "runtime",
-    "realtime",
-    "trigger_livetime",
-    "livetime",
-    "input_count_rate",
-    "output_count_rate",
-    "max_sca_length",
-    "run_active",
-    "buffer_len",
-    "buffer_done",
-    "buffer_full_a",
-    "buffer_full_b",
-    "buffer_a",
-    "buffer_b",
-    "current_pixel",
-    "buffer_overrun",
-    "module_statistics_2",
-    "module_mca",
-    "mca_events",
-    "total_output_events",
-    "list_buffer_len_a",
-    "list_buffer_len_b",
-    "mapping_pixel_next"
-};
+    {
+        "mca_length",
+        "mca",
+        "baseline_length",
+        "runtime",
+        "realtime",
+        "trigger_livetime",
+        "livetime",
+        "input_count_rate",
+        "output_count_rate",
+        "max_sca_length",
+        "sca_length",
+        "sca",
+        "run_active",
+        "buffer_len",
+        "buffer_done",
+        "buffer_full_a",
+        "buffer_full_b",
+        "buffer_a",
+        "buffer_b",
+        "current_pixel",
+        "buffer_overrun",
+        "module_statistics_2",
+        "module_mca",
+        "mca_events",
+        "total_output_events",
+        "list_buffer_len_a",
+        "list_buffer_len_b",
+        "mapping_pixel_next"
+    };
 
 #define GET_RUN_DATA_HANDLER_COUNT (sizeof(getRunDataLabels) / sizeof(const char*))
 
 PSL_STATIC DoBoardOperation_FP getRunDataHandlers[MAPPING_MODE_COUNT][GET_RUN_DATA_HANDLER_COUNT] =
-{
     {
-        psl__mm0_mca_length,
-        psl__mm0_mca,
-        psl__mm0_baseline_length,
-        psl__mm0_runtime,
-        psl__mm0_realtime,
-        psl__mm0_trigger_livetime,
-        psl__mm0_livetime,
-        psl__mm0_input_count_rate,
-        psl__mm0_output_count_rate,
-        psl__mm0_max_sca_length,
-        psl__mm0_run_active,
-        NULL,   /* psl__mm0_buffer_len */
-        NULL,   /* psl__mm0_buffer_done */
-        NULL,   /* psl__mm0_buffer_full_a */
-        NULL,   /* psl__mm0_buffer_full_b */
-        NULL,   /* psl__mm0_buffer_a */
-        NULL,   /* psl__mm0_buffer_b */
-        NULL,   /* psl__mm0_current_pixel */
-        NULL,   /* psl__mm0_buffer_overrun */
-        psl__mm0_module_statistics_2,
-        psl__mm0_module_mca,
-        psl__mm0_mca_events,
-        psl__mm0_total_output_events,
-        NULL,   /* psl__mm0_list_buffer_len_a */
-        NULL,   /* psl__mm0_list_buffer_len_b */
-        NULL,   /* psl__mm0_mapping_pixel_next */
-    },
-    {
-        psl__mm1_mca_length,
-        NULL,   /* psl__mm1_mca */
-        NULL,   /* psl__mm1_baseline_length */
-        NULL,   /* psl__mm1_runtime */
-        NULL,   /* psl__mm1_realtime */
-        NULL,   /* psl__mm1_trigger_livetime */
-        NULL,   /* psl__mm1_livetime */
-        NULL,   /* psl__mm1_input_count_rate */
-        NULL,   /* psl__mm1_output_count_rate */
-        psl__mm0_max_sca_length, /* Defer to mm0 routine--this is generic. */
-        psl__mm1_run_active,
-        psl__mm1_buffer_len,
-        psl__mm1_buffer_done,
-        psl__mm1_buffer_full_a,
-        psl__mm1_buffer_full_b,
-        psl__mm1_buffer_a,
-        psl__mm1_buffer_b,
-        psl__mm1_current_pixel,
-        psl__mm1_buffer_overrun,
-        psl__mm1_module_statistics_2,
-        NULL,   /* psl__mm1_module_mca */
-        NULL,   /* psl__mm1_mca_events */
-        NULL,   /* psl__mm1_total_output_events */
-        NULL,   /* psl__mm1_list_buffer_len_a */
-        NULL,   /* psl__mm1_list_buffer_len_b */
-        psl__mm1_mapping_pixel_next,
-    },
-    {
-        NULL,   /* psl__mm2_mca_length */
-        NULL,   /* psl__mm2_mca */
-        NULL,   /* psl__mm2_baseline_length */
-        NULL,   /* psl__mm2_runtime */
-        NULL,   /* psl__mm2_realtime */
-        NULL,   /* psl__mm2_trigger_livetime */
-        NULL,   /* psl__mm2_livetime */
-        NULL,   /* psl__mm2_input_count_rate */
-        NULL,   /* psl__mm2_output_count_rate */
-        NULL,   /* psl__mm2_max_sca_length */
-        NULL,   /* psl__mm2_run_active */
-        NULL,   /* psl__mm2_buffer_len */
-        NULL,   /* psl__mm2_buffer_done */
-        NULL,   /* psl__mm2_buffer_full_a */
-        NULL,   /* psl__mm2_buffer_full_b */
-        NULL,   /* psl__mm2_buffer_a */
-        NULL,   /* psl__mm2_buffer_b */
-        NULL,   /* psl__mm2_current_pixel */
-        NULL,   /* psl__mm2_buffer_overrun */
-        NULL,   /* psl__mm2_module_statistics_2 */
-        NULL,   /* psl__mm2_module_mca */
-        NULL,   /* psl__mm2_mca_events */
-        NULL,   /* psl__mm2_total_output_events */
-        NULL,   /* psl__mm2_list_buffer_len_a */
-        NULL,   /* psl__mm2_list_buffer_len_b */
-        NULL,   /* psl__mm2_mapping_pixel_next */
-    },
-};
+        {
+            psl__mm0_mca_length,
+            psl__mm0_mca,
+            psl__mm0_baseline_length,
+            psl__mm0_runtime,
+            psl__mm0_realtime,
+            psl__mm0_trigger_livetime,
+            psl__mm0_livetime,
+            psl__mm0_input_count_rate,
+            psl__mm0_output_count_rate,
+            psl__mm0_max_sca_length,
+            psl__mm0_sca_length,
+            psl__mm0_sca,
+            psl__mm0_run_active,
+            NULL,   /* psl__mm0_buffer_len */
+            NULL,   /* psl__mm0_buffer_done */
+            NULL,   /* psl__mm0_buffer_full_a */
+            NULL,   /* psl__mm0_buffer_full_b */
+            NULL,   /* psl__mm0_buffer_a */
+            NULL,   /* psl__mm0_buffer_b */
+            NULL,   /* psl__mm0_current_pixel */
+            NULL,   /* psl__mm0_buffer_overrun */
+            psl__mm0_module_statistics_2,
+            psl__mm0_module_mca,
+            psl__mm0_mca_events,
+            psl__mm0_total_output_events,
+            NULL,   /* psl__mm0_list_buffer_len_a */
+            NULL,   /* psl__mm0_list_buffer_len_b */
+            NULL,   /* psl__mm0_mapping_pixel_next */
+        },
+        {
+            psl__mm1_mca_length,
+            NULL,   /* psl__mm1_mca */
+            NULL,   /* psl__mm1_baseline_length */
+            NULL,   /* psl__mm1_runtime */
+            NULL,   /* psl__mm1_realtime */
+            NULL,   /* psl__mm1_trigger_livetime */
+            NULL,   /* psl__mm1_livetime */
+            NULL,   /* psl__mm1_input_count_rate */
+            NULL,   /* psl__mm1_output_count_rate */
+            psl__mm0_max_sca_length, /* Defer to mm0 routine--this is generic. */
+            NULL,   /* psl__mm0_sca_length */
+            NULL,   /* psl__mm0_sca */
+            psl__mm1_run_active,
+            psl__mm1_buffer_len,
+            psl__mm1_buffer_done,
+            psl__mm1_buffer_full_a,
+            psl__mm1_buffer_full_b,
+            psl__mm1_buffer_a,
+            psl__mm1_buffer_b,
+            psl__mm1_current_pixel,
+            psl__mm1_buffer_overrun,
+            psl__mm1_module_statistics_2,
+            NULL,   /* psl__mm1_module_mca */
+            NULL,   /* psl__mm1_mca_events */
+            NULL,   /* psl__mm1_total_output_events */
+            NULL,   /* psl__mm1_list_buffer_len_a */
+            NULL,   /* psl__mm1_list_buffer_len_b */
+            psl__mm1_mapping_pixel_next,
+        },
+        {
+            NULL,   /* psl__mm2_mca_length */
+            NULL,   /* psl__mm2_mca */
+            NULL,   /* psl__mm2_baseline_length */
+            NULL,   /* psl__mm2_runtime */
+            NULL,   /* psl__mm2_realtime */
+            NULL,   /* psl__mm2_trigger_livetime */
+            NULL,   /* psl__mm2_livetime */
+            NULL,   /* psl__mm2_input_count_rate */
+            NULL,   /* psl__mm2_output_count_rate */
+            NULL,   /* psl__mm2_max_sca_length */
+            NULL,   /* psl__mm0_sca_length */
+            NULL,   /* psl__mm0_sca */
+            NULL,   /* psl__mm2_run_active */
+            NULL,   /* psl__mm2_buffer_len */
+            NULL,   /* psl__mm2_buffer_done */
+            NULL,   /* psl__mm2_buffer_full_a */
+            NULL,   /* psl__mm2_buffer_full_b */
+            NULL,   /* psl__mm2_buffer_a */
+            NULL,   /* psl__mm2_buffer_b */
+            NULL,   /* psl__mm2_current_pixel */
+            NULL,   /* psl__mm2_buffer_overrun */
+            NULL,   /* psl__mm2_module_statistics_2 */
+            NULL,   /* psl__mm2_module_mca */
+            NULL,   /* psl__mm2_mca_events */
+            NULL,   /* psl__mm2_total_output_events */
+            NULL,   /* psl__mm2_list_buffer_len_a */
+            NULL,   /* psl__mm2_list_buffer_len_b */
+            NULL,   /* psl__mm2_mapping_pixel_next */
+        },
+    };
 
 PSL_STATIC int psl__GetRunData(int detChan, const char *name, void *value,
                                XiaDefaults *defs, Detector *detector, Module *module)
@@ -5216,30 +5219,29 @@ PSL_STATIC int psl__GetRunData(int detChan, const char *name, void *value,
 
     UNUSED(defs);
 
-    AcquisitionValue* mapping_mode;
+    acqValue mapping_mode;
 
     int h;
 
     xiaPSLBadArgs(module, detector, "psl__GetRunData");
 
-    mapping_mode = psl__GetAcquisition(fDetector, "mapping_mode");
+    mapping_mode = psl__GetAcqValue(fDetector, "mapping_mode");
 
-    ASSERT(mapping_mode);
 
     pslLog(PSL_LOG_DEBUG, "Detector:%d Mapping Mode:%d Name:%s",
-           detChan, (int) mapping_mode->value.ref.i, name);
+           detChan, (int) mapping_mode.ref.i, name);
 
-    if (mapping_mode->value.ref.i >= MAPPING_MODE_COUNT) {
+    if (mapping_mode.ref.i >= MAPPING_MODE_COUNT) {
         status = XIA_INVALID_VALUE;
         pslLog(PSL_LOG_ERROR, status,
-               "Invalid mapping_mode: %d", (int) mapping_mode->value.ref.i);
+               "Invalid mapping_mode: %d", (int) mapping_mode.ref.i);
         return status;
     }
 
     for (h = 0; h < (int) GET_RUN_DATA_HANDLER_COUNT; ++h) {
         if (STREQ(name, getRunDataLabels[h])) {
             DoBoardOperation_FP handler;
-            handler = getRunDataHandlers[mapping_mode->value.ref.i][h];
+            handler = getRunDataHandlers[mapping_mode.ref.i][h];
             if (handler) {
                 return handler(detChan, detector, module,
                                name, value);
@@ -5400,9 +5402,9 @@ PSL_STATIC int psl__GetSpecialRunData(int detChan, const char *name, void *value
         return status;
 
     if (STREQ(name, "detc-progress-text-size")) {
-            pslLog(PSL_LOG_INFO,
-                   "Progress text size: %zu", sizeof(fDetector->calibStage));
-            *((int*) value) = sizeof(fDetector->calibStage);
+        pslLog(PSL_LOG_INFO,
+               "Progress text size: %zu", sizeof(fDetector->calibStage));
+        *((int*) value) = sizeof(fDetector->calibStage);
     }
     else if (STREQ(name, "detc-running")) {
         pslLog(PSL_LOG_INFO,
@@ -5526,6 +5528,7 @@ PSL_STATIC int psl__IniWrite(FILE* fp, const char* section, const char* path,
             char item[MAXITEM_LEN];
             char firmware[MAXITEM_LEN];
             char filename[MAXITEM_LEN];
+
             int status;
 
             chanDetector = psl__FindDetector(module, modChan);
@@ -5569,7 +5572,7 @@ PSL_STATIC int psl__IniWrite(FILE* fp, const char* section, const char* path,
     return XIA_SUCCESS;
 }
 
- PSL_STATIC int psl__ModuleTransactionSend(Module* module, SincBuffer* packet)
+PSL_STATIC int psl__ModuleTransactionSend(Module* module, SincBuffer* packet)
 {
     int status;
 
@@ -5800,66 +5803,66 @@ PSL_STATIC int psl__ReceiveHistogram_MM0(Detector*                detector,
     int status = XIA_SUCCESS;
     int sstatus;
 
-     MMC0_Data* mm0;
+    MMC0_Data* mm0;
 
-     mm0 = psl__MappingModeControl_MM0Data(mmc);
+    mm0 = psl__MappingModeControl_MM0Data(mmc);
 
-     psl__MappingModeBuffers_Next_Clear(&mm0->buffers);
+    psl__MappingModeBuffers_Next_Clear(&mm0->buffers);
 
-     if (accepted->len) {
-         if (mm0->numMCAChannels != (uint32_t) accepted->len) {
-             pslLog(PSL_LOG_ERROR, XIA_INVALID_VALUE,
-                    "Invalid accepted length (mca_channels=%d,accepted=%d): %s",
-                    mm0->numMCAChannels, accepted->len, detector->alias);
-         } else {
-             status = psl__MappingModeBuffers_CopyIn(&mm0->buffers,
-                                                     accepted->data,
-                                                     (size_t) accepted->len);
-             if (status != XIA_SUCCESS) {
-                 pslLog(PSL_LOG_ERROR, status,
-                        "Error coping in accepted data: %s", detector->alias);
-             }
-         }
-     }
+    if (accepted->len) {
+        if (mm0->numMCAChannels != (uint32_t) accepted->len) {
+            pslLog(PSL_LOG_ERROR, XIA_INVALID_VALUE,
+                   "Invalid accepted length (mca_channels=%d,accepted=%d): %s",
+                   mm0->numMCAChannels, accepted->len, detector->alias);
+        } else {
+            status = psl__MappingModeBuffers_CopyIn(&mm0->buffers,
+                                                    accepted->data,
+                                                    (size_t) accepted->len);
+            if (status != XIA_SUCCESS) {
+                pslLog(PSL_LOG_ERROR, status,
+                       "Error coping in accepted data: %s", detector->alias);
+            }
+        }
+    }
 
-     if (rejected->len) {
-         if (mm0->numMCAChannels != (uint32_t) rejected->len) {
-             pslLog(PSL_LOG_ERROR, XIA_INVALID_VALUE,
-                    "Invalid rejected length (mca_channels=%d,rejected=%d): %s",
-                    mm0->numMCAChannels, rejected->len, detector->alias);
-         } else {
-             sstatus = psl__MappingModeBuffers_CopyIn(&mm0->buffers,
-                                                      rejected->data,
-                                                      (size_t) rejected->len);
-             if (sstatus != XIA_SUCCESS) {
-                 pslLog(PSL_LOG_ERROR, sstatus,
-                        "Error coping in rejected data: %s", detector->alias);
-             }
-             if ((status == XIA_SUCCESS) && (sstatus != XIA_SUCCESS))
-                 status = sstatus;
-         }
-     }
+    if (rejected->len) {
+        if (mm0->numMCAChannels != (uint32_t) rejected->len) {
+            pslLog(PSL_LOG_ERROR, XIA_INVALID_VALUE,
+                   "Invalid rejected length (mca_channels=%d,rejected=%d): %s",
+                   mm0->numMCAChannels, rejected->len, detector->alias);
+        } else {
+            sstatus = psl__MappingModeBuffers_CopyIn(&mm0->buffers,
+                                                     rejected->data,
+                                                     (size_t) rejected->len);
+            if (sstatus != XIA_SUCCESS) {
+                pslLog(PSL_LOG_ERROR, sstatus,
+                       "Error coping in rejected data: %s", detector->alias);
+            }
+            if ((status == XIA_SUCCESS) && (sstatus != XIA_SUCCESS))
+                status = sstatus;
+        }
+    }
 
-     /*
-      * Copy in the FalconXN stats we received. It is better to buffer 32bit
-      * values than doubles. We buffer with the histogram to make sure the
-      * stats and the histogram match.
-      */
-     sstatus = psl__MappingModeBuffers_CopyIn(&mm0->buffers,
-                                              stats,
-                                              mm0->numStats);
-     if (sstatus != XIA_SUCCESS) {
-         pslLog(PSL_LOG_ERROR, sstatus,
-                "Error coping in stats: %s", detector->alias);
-     }
+    /*
+     * Copy in the FalconXN stats we received. It is better to buffer 32bit
+     * values than doubles. We buffer with the histogram to make sure the
+     * stats and the histogram match.
+     */
+    sstatus = psl__MappingModeBuffers_CopyIn(&mm0->buffers,
+                                             stats,
+                                             mm0->numStats);
+    if (sstatus != XIA_SUCCESS) {
+        pslLog(PSL_LOG_ERROR, sstatus,
+               "Error coping in stats: %s", detector->alias);
+    }
 
-     if ((status == XIA_SUCCESS) && (sstatus != XIA_SUCCESS))
-         status = sstatus;
+    if ((status == XIA_SUCCESS) && (sstatus != XIA_SUCCESS))
+        status = sstatus;
 
 
-     psl__MappingModeBuffers_Toggle(&mm0->buffers);
+    psl__MappingModeBuffers_Toggle(&mm0->buffers);
 
-     return status;
+    return status;
 }
 
 PSL_STATIC int psl__ReceiveHistogram_MM1(Module*                  module,
@@ -5915,7 +5918,7 @@ PSL_STATIC int psl__ReceiveHistogram_MM1(Module*                  module,
     if (psl__MappingModeBuffers_PixelsReceived(mmb)) {
         pslLog(PSL_LOG_INFO,
                "Pixel count reached: %s", detector->alias);
-      return status;
+        return status;
     }
 
     /*
@@ -6125,42 +6128,42 @@ PSL_STATIC int psl__ReceiveHistogramData(Module* module, SincBuffer* packet)
 
     switch (psl__MappingModeControl_Mode(mmc))
     {
-        case MAPPING_MODE_NIL:
-            break;
+    case MAPPING_MODE_NIL:
+        break;
 
-        case MAPPING_MODE_MCA:
-            status = psl__ReceiveHistogram_MM0(detector,
-                                               mmc,
-                                               &accepted,
-                                               &rejected,
-                                               &stats);
-            if (status != XIA_SUCCESS) {
-                pslLog(PSL_LOG_ERROR, status,
-                       "Error in MM0 histogram receiver: %s", detector->alias);
-            }
-            break;
+    case MAPPING_MODE_MCA:
+        status = psl__ReceiveHistogram_MM0(detector,
+                                           mmc,
+                                           &accepted,
+                                           &rejected,
+                                           &stats);
+        if (status != XIA_SUCCESS) {
+            pslLog(PSL_LOG_ERROR, status,
+                   "Error in MM0 histogram receiver: %s", detector->alias);
+        }
+        break;
 
-        case MAPPING_MODE_MCA_FSM:
-            status = psl__ReceiveHistogram_MM1(module,
-                                               detector,
-                                               channel,
-                                               mmc,
-                                               &accepted,
-                                               &stats);
-            if (status != XIA_SUCCESS) {
-                pslLog(PSL_LOG_ERROR, status,
-                       "Error in MM1 histogram receiver: %s", detector->alias);
-            }
-            break;
+    case MAPPING_MODE_MCA_FSM:
+        status = psl__ReceiveHistogram_MM1(module,
+                                           detector,
+                                           channel,
+                                           mmc,
+                                           &accepted,
+                                           &stats);
+        if (status != XIA_SUCCESS) {
+            pslLog(PSL_LOG_ERROR, status,
+                   "Error in MM1 histogram receiver: %s", detector->alias);
+        }
+        break;
 
-        case MAPPING_MODE_SCA:
-        case MAPPINGMODE_LIST:
-        case MAPPING_MODE_COUNT:
-        default:
-            pslLog(PSL_LOG_ERROR, XIA_INVALID_VALUE,
-                   "Invalid mapping mode (%d): %s",
-                   psl__MappingModeControl_Mode(mmc), detector->alias);
-            break;
+    case MAPPING_MODE_SCA:
+    case MAPPINGMODE_LIST:
+    case MAPPING_MODE_COUNT:
+    default:
+        pslLog(PSL_LOG_ERROR, XIA_INVALID_VALUE,
+               "Invalid mapping mode (%d): %s",
+               psl__MappingModeControl_Mode(mmc), detector->alias);
+        break;
     }
 
     status = psl__DetectorUnlock(detector);
@@ -6741,96 +6744,96 @@ PSL_STATIC int psl__ModuleReceiveProcessor(Module*                   module,
         /*
          * Async responses.
          */
-        case SI_TORO__SINC__MESSAGE_TYPE__HISTOGRAM_DATA_RESPONSE:
-            status = psl__ReceiveHistogramData(module, packet);
-            break;
+    case SI_TORO__SINC__MESSAGE_TYPE__HISTOGRAM_DATA_RESPONSE:
+        status = psl__ReceiveHistogramData(module, packet);
+        break;
 
-        case SI_TORO__SINC__MESSAGE_TYPE__LIST_MODE_DATA_RESPONSE:
-            status = psl__ReceiveListModeData(module, packet);
-            break;
+    case SI_TORO__SINC__MESSAGE_TYPE__LIST_MODE_DATA_RESPONSE:
+        status = psl__ReceiveListModeData(module, packet);
+        break;
 
-        case SI_TORO__SINC__MESSAGE_TYPE__OSCILLOSCOPE_DATA_RESPONSE:
-            status = psl__ReceiveOscilloscopeData(module, packet);
-            break;
+    case SI_TORO__SINC__MESSAGE_TYPE__OSCILLOSCOPE_DATA_RESPONSE:
+        status = psl__ReceiveOscilloscopeData(module, packet);
+        break;
 
-        case SI_TORO__SINC__MESSAGE_TYPE__CALIBRATION_PROGRESS_RESPONSE:
-            status = psl__ReceiveCalibrationProgress(module, packet);
-            break;
+    case SI_TORO__SINC__MESSAGE_TYPE__CALIBRATION_PROGRESS_RESPONSE:
+        status = psl__ReceiveCalibrationProgress(module, packet);
+        break;
 
         /*
          * Internal errors.
          */
-        case SI_TORO__SINC__MESSAGE_TYPE__ASYNCHRONOUS_ERROR_RESPONSE:
-            status = psl__ReceiveAsynchronousError(module, packet);
-            break;
+    case SI_TORO__SINC__MESSAGE_TYPE__ASYNCHRONOUS_ERROR_RESPONSE:
+        status = psl__ReceiveAsynchronousError(module, packet);
+        break;
 
         /*
          * Command responses.
          */
-        case SI_TORO__SINC__MESSAGE_TYPE__SUCCESS_RESPONSE:
-            status = psl__ReceiveSuccess(module, packet);
-            break;
+    case SI_TORO__SINC__MESSAGE_TYPE__SUCCESS_RESPONSE:
+        status = psl__ReceiveSuccess(module, packet);
+        break;
 
-        case SI_TORO__SINC__MESSAGE_TYPE__GET_PARAM_RESPONSE:
-            status = psl__ReceiveGetParam(module, packet);
-            break;
+    case SI_TORO__SINC__MESSAGE_TYPE__GET_PARAM_RESPONSE:
+        status = psl__ReceiveGetParam(module, packet);
+        break;
 
-        case SI_TORO__SINC__MESSAGE_TYPE__GET_CALIBRATION_RESPONSE:
-            status = psl__ReceiveGetCalibration(module, packet);
-            break;
+    case SI_TORO__SINC__MESSAGE_TYPE__GET_CALIBRATION_RESPONSE:
+        status = psl__ReceiveGetCalibration(module, packet);
+        break;
 
-        case SI_TORO__SINC__MESSAGE_TYPE__CALCULATE_DC_OFFSET_RESPONSE:
-            status = psl__ReceiveCalculateDCOffset(module, packet);
-            break;
+    case SI_TORO__SINC__MESSAGE_TYPE__CALCULATE_DC_OFFSET_RESPONSE:
+        status = psl__ReceiveCalculateDCOffset(module, packet);
+        break;
 
-        case SI_TORO__SINC__MESSAGE_TYPE__LIST_PARAM_DETAILS_RESPONSE:
-            status = psl__ReceiveListParamDetails(module, packet);
-            break;
+    case SI_TORO__SINC__MESSAGE_TYPE__LIST_PARAM_DETAILS_RESPONSE:
+        status = psl__ReceiveListParamDetails(module, packet);
+        break;
 
-        case SI_TORO__SINC__MESSAGE_TYPE__PARAM_UPDATED_RESPONSE:
-            status = psl__ReceiveParamUpdated(module, packet);
-            break;
+    case SI_TORO__SINC__MESSAGE_TYPE__PARAM_UPDATED_RESPONSE:
+        status = psl__ReceiveParamUpdated(module, packet);
+        break;
 
-        case SI_TORO__SINC__MESSAGE_TYPE__SOFTWARE_UPDATE_COMPLETE_RESPONSE:
-            status = psl__ReceiveSoftwareUpdateComplete(module, packet);
-            break;
+    case SI_TORO__SINC__MESSAGE_TYPE__SOFTWARE_UPDATE_COMPLETE_RESPONSE:
+        status = psl__ReceiveSoftwareUpdateComplete(module, packet);
+        break;
 
-        case SI_TORO__SINC__MESSAGE_TYPE__CHECK_PARAM_CONSISTENCY_RESPONSE:
-            status = psl__ReceiveCheckParamConsistency(module, packet);
-            break;
+    case SI_TORO__SINC__MESSAGE_TYPE__CHECK_PARAM_CONSISTENCY_RESPONSE:
+        status = psl__ReceiveCheckParamConsistency(module, packet);
+        break;
 
-        case SI_TORO__SINC__MESSAGE_TYPE__NO_MESSAGE_TYPE:
-        case SI_TORO__SINC__MESSAGE_TYPE__PING_COMMAND:
-        case SI_TORO__SINC__MESSAGE_TYPE__GET_PARAM_COMMAND:
-        case SI_TORO__SINC__MESSAGE_TYPE__SET_PARAM_COMMAND:
-        case SI_TORO__SINC__MESSAGE_TYPE__START_HISTOGRAM_COMMAND:
-        case SI_TORO__SINC__MESSAGE_TYPE__START_LIST_MODE_COMMAND:
-        case SI_TORO__SINC__MESSAGE_TYPE__START_OSCILLOSCOPE_COMMAND:
-        case SI_TORO__SINC__MESSAGE_TYPE__STOP_DATA_ACQUISITION_COMMAND:
-        case SI_TORO__SINC__MESSAGE_TYPE__RESET_SPATIAL_SYSTEM_COMMAND:
-        case SI_TORO__SINC__MESSAGE_TYPE__START_CALIBRATION_COMMAND:
-        case SI_TORO__SINC__MESSAGE_TYPE__GET_CALIBRATION_COMMAND:
-        case SI_TORO__SINC__MESSAGE_TYPE__SET_CALIBRATION_COMMAND:
-        case SI_TORO__SINC__MESSAGE_TYPE__CALCULATE_DC_OFFSET_COMMAND:
-        case SI_TORO__SINC__MESSAGE_TYPE__CLEAR_HISTOGRAM_COMMAND:
-        case SI_TORO__SINC__MESSAGE_TYPE__LIST_PARAM_DETAILS_COMMAND:
-        case SI_TORO__SINC__MESSAGE_TYPE__START_FFT_COMMAND:
-        case SI_TORO__SINC__MESSAGE_TYPE__RESTART_COMMAND:
-        case SI_TORO__SINC__MESSAGE_TYPE__SOFTWARE_UPDATE_COMMAND:
-        case SI_TORO__SINC__MESSAGE_TYPE__SAVE_CONFIGURATION_COMMAND:
-        case SI_TORO__SINC__MESSAGE_TYPE__MONITOR_CHANNELS_COMMAND:
-        case _SI_TORO__SINC__MESSAGE_TYPE_IS_INT_SIZE:
-        case SI_TORO__SINC__MESSAGE_TYPE__PROBE_DATAGRAM_COMMAND:
-        case SI_TORO__SINC__MESSAGE_TYPE__PROBE_DATAGRAM_RESPONSE:
-        case SI_TORO__SINC__MESSAGE_TYPE__HISTOGRAM_DATAGRAM_RESPONSE:
-        case SI_TORO__SINC__MESSAGE_TYPE__DOWNLOAD_CRASH_DUMP_COMMAND:
-        case SI_TORO__SINC__MESSAGE_TYPE__DOWNLOAD_CRASH_DUMP_RESPONSE:
-        case SI_TORO__SINC__MESSAGE_TYPE__CHECK_PARAM_CONSISTENCY_COMMAND:
-        default:
-            pslLog(PSL_LOG_INFO,
-                   "Invalid message type for FalconXN connection: %s:%d: %d",
-                   fModule->hostAddress, fModule->portBase, msgType);
-            break;
+    case SI_TORO__SINC__MESSAGE_TYPE__NO_MESSAGE_TYPE:
+    case SI_TORO__SINC__MESSAGE_TYPE__PING_COMMAND:
+    case SI_TORO__SINC__MESSAGE_TYPE__GET_PARAM_COMMAND:
+    case SI_TORO__SINC__MESSAGE_TYPE__SET_PARAM_COMMAND:
+    case SI_TORO__SINC__MESSAGE_TYPE__START_HISTOGRAM_COMMAND:
+    case SI_TORO__SINC__MESSAGE_TYPE__START_LIST_MODE_COMMAND:
+    case SI_TORO__SINC__MESSAGE_TYPE__START_OSCILLOSCOPE_COMMAND:
+    case SI_TORO__SINC__MESSAGE_TYPE__STOP_DATA_ACQUISITION_COMMAND:
+    case SI_TORO__SINC__MESSAGE_TYPE__RESET_SPATIAL_SYSTEM_COMMAND:
+    case SI_TORO__SINC__MESSAGE_TYPE__START_CALIBRATION_COMMAND:
+    case SI_TORO__SINC__MESSAGE_TYPE__GET_CALIBRATION_COMMAND:
+    case SI_TORO__SINC__MESSAGE_TYPE__SET_CALIBRATION_COMMAND:
+    case SI_TORO__SINC__MESSAGE_TYPE__CALCULATE_DC_OFFSET_COMMAND:
+    case SI_TORO__SINC__MESSAGE_TYPE__CLEAR_HISTOGRAM_COMMAND:
+    case SI_TORO__SINC__MESSAGE_TYPE__LIST_PARAM_DETAILS_COMMAND:
+    case SI_TORO__SINC__MESSAGE_TYPE__START_FFT_COMMAND:
+    case SI_TORO__SINC__MESSAGE_TYPE__RESTART_COMMAND:
+    case SI_TORO__SINC__MESSAGE_TYPE__SOFTWARE_UPDATE_COMMAND:
+    case SI_TORO__SINC__MESSAGE_TYPE__SAVE_CONFIGURATION_COMMAND:
+    case SI_TORO__SINC__MESSAGE_TYPE__MONITOR_CHANNELS_COMMAND:
+    case _SI_TORO__SINC__MESSAGE_TYPE_IS_INT_SIZE:
+    case SI_TORO__SINC__MESSAGE_TYPE__PROBE_DATAGRAM_COMMAND:
+    case SI_TORO__SINC__MESSAGE_TYPE__PROBE_DATAGRAM_RESPONSE:
+    case SI_TORO__SINC__MESSAGE_TYPE__HISTOGRAM_DATAGRAM_RESPONSE:
+    case SI_TORO__SINC__MESSAGE_TYPE__DOWNLOAD_CRASH_DUMP_COMMAND:
+    case SI_TORO__SINC__MESSAGE_TYPE__DOWNLOAD_CRASH_DUMP_RESPONSE:
+    case SI_TORO__SINC__MESSAGE_TYPE__CHECK_PARAM_CONSISTENCY_COMMAND:
+    default:
+        pslLog(PSL_LOG_INFO,
+               "Invalid message type for FalconXN connection: %s:%d: %d",
+               fModule->hostAddress, fModule->portBase, msgType);
+        break;
     }
 
     return status;
@@ -6838,9 +6841,9 @@ PSL_STATIC int psl__ModuleReceiveProcessor(Module*                   module,
 
 /* Suppress while(0) warnings in protobuf code transitively included through sinc. */
 #ifdef _WIN32
-#define PSL_SINC_BUFFER_CLEAR(x) __pragma( warning(push) )    \
-    __pragma( warning(disable:4127) ) \
-    SINC_BUFFER_CLEAR(x) \
+#define PSL_SINC_BUFFER_CLEAR(x) __pragma( warning(push) )  \
+    __pragma( warning(disable:4127) )                       \
+    SINC_BUFFER_CLEAR(x)                                    \
     __pragma( warning(pop) )
 #else
 #define PSL_SINC_BUFFER_CLEAR(x) SINC_BUFFER_CLEAR(x)
@@ -6976,7 +6979,6 @@ PSL_STATIC int psl__SetupModule(Module *module)
 
     pslLog(PSL_LOG_DEBUG, "Module %s", module->alias);
 
-    ASSERT(module);
     ASSERT(module->pslData == NULL);
 
     fModule = handel_md_alloc(sizeof(FalconXNModule));
@@ -7208,8 +7210,6 @@ PSL_STATIC int psl__SetupDetChan(int detChan, Detector *detector, Module *module
 
     int modDetChan;
 
-    int av;
-
     modDetChan = xiaGetModChan(detChan);
 
     if (modDetChan == 999) {
@@ -7285,40 +7285,6 @@ PSL_STATIC int psl__SetupDetChan(int detChan, Detector *detector, Module *module
 
     detector->pslData = fDetector;
 
-    /*
-     * Set up the detector's local copy.
-     */
-    fDetector->numOfAcqValues = SI_DET_NUM_OF_ACQ_VALUES;
-    fDetector->acqValues =
-        handel_md_alloc((size_t)fDetector->numOfAcqValues * sizeof(AcquisitionValue));
-    if (fDetector->acqValues == NULL) {
-        handel_md_event_destroy(&fDetector->asyncEvent);
-        handel_md_mutex_destroy(&fDetector->lock);
-        handel_md_free(fDetector);
-        pslLog(PSL_LOG_ERROR, XIA_NOMEM,
-               "No memory for detector acquisition values");
-        return XIA_NOMEM;
-    }
-
-    for (av = 0; av < fDetector->numOfAcqValues; ++av) {
-        fDetector->acqValues[av] = DEFAULT_ACQ_VALUES[av];
-    }
-
-    /*
-     * Set up the ACQ values from the defaults.
-     */
-    status = psl__ReloadDefaults(fDetector);
-    if (status != XIA_SUCCESS) {
-        detector->pslData = NULL;
-        handel_md_event_destroy(&fDetector->asyncEvent);
-        handel_md_mutex_destroy(&fDetector->lock);
-        handel_md_free(fDetector->acqValues);
-        handel_md_free(fDetector);
-        pslLog(PSL_LOG_ERROR, status,
-               "Detector channel default load failed: %d", modDetChan);
-        return status;
-    }
-
     fDetector->detChan = detChan;
 
     fDetector->channelState = ChannelDisconnected;
@@ -7330,7 +7296,6 @@ PSL_STATIC int psl__SetupDetChan(int detChan, Detector *detector, Module *module
         detector->pslData = NULL;
         handel_md_event_destroy(&fDetector->asyncEvent);
         handel_md_mutex_destroy(&fDetector->lock);
-        handel_md_free(fDetector->acqValues);
         handel_md_free(fDetector);
         pslLog(PSL_LOG_ERROR, status, "Unable to get channel.state");
         return status;
@@ -7345,7 +7310,6 @@ PSL_STATIC int psl__SetupDetChan(int detChan, Detector *detector, Module *module
             detector->pslData = NULL;
             handel_md_event_destroy(&fDetector->asyncEvent);
             handel_md_mutex_destroy(&fDetector->lock);
-            handel_md_free(fDetector->acqValues);
             handel_md_free(fDetector);
             pslLog(PSL_LOG_ERROR, status,
                    "Unable to stop any running data acquisition modes");
@@ -7358,10 +7322,9 @@ PSL_STATIC int psl__SetupDetChan(int detChan, Detector *detector, Module *module
         detector->pslData = NULL;
         handel_md_event_destroy(&fDetector->asyncEvent);
         handel_md_mutex_destroy(&fDetector->lock);
-        handel_md_free(fDetector->acqValues);
         handel_md_free(fDetector);
         pslLog(PSL_LOG_ERROR, status,
-                   "Unable to set channel monitoring");
+               "Unable to set channel monitoring");
         return status;
     }
 
@@ -7408,7 +7371,6 @@ PSL_STATIC int psl__EndDetChan(int detChan, Detector *detector, Module *module)
 
         handel_md_event_destroy(&fDetector->asyncEvent);
         handel_md_mutex_destroy(&fDetector->lock);
-        handel_md_free(fDetector->acqValues);
         handel_md_free(fDetector);
 
         detector->pslData = NULL;
@@ -7471,53 +7433,58 @@ PSL_STATIC int psl__UserSetup(int detChan, Detector *detector, Module *module)
      * Loop over the ACQ defaults and make sure they are all present. If they
      * are not add them. They should be written to the INI file when saved.
      */
-    for (i = 0; i < fDetector->numOfAcqValues; i++) {
+    for (i = 0; i < SI_DET_NUM_OF_DEFAULT_ACQ_VALUES; i++) {
         defaults = xiaGetDefaultFromDetChan(detChan);
         entry = defaults->entry;
 
         while (entry) {
-            if (strcmp(entry->name, fDetector->acqValues[i].name) == 0) {
+            if (strcmp(entry->name, DEFAULT_ACQ_VALUES[i].name) == 0) {
                 break;
             }
             entry = entry->next;
         }
         if ((entry == NULL) &&
-            ((fDetector->acqValues[i].flags & PSL_ACQ_HAS_DEFAULT) != 0)) {
+            ((DEFAULT_ACQ_VALUES[i].flags & PSL_ACQ_HAS_DEFAULT) != 0)) {
+            double value = DEFAULT_ACQ_VALUES[i].defaultValue;
             status = xiaAddDefaultItem(defaults->alias,
-                                       fDetector->acqValues[i].name,
-                                       &fDetector->acqValues[i].defaultValue);
+                                       DEFAULT_ACQ_VALUES[i].name,
+                                       &value);
             if (status != XIA_SUCCESS) {
                 pslLog(PSL_LOG_ERROR, status,
                        "Adding default: %s <-r %s",
-                       defaults->alias, fDetector->acqValues[i].name);
+                       defaults->alias, DEFAULT_ACQ_VALUES[i].name);
             }
         }
     }
+
     /*
      * Some acquisition values require synchronization with another data
      * structure in the program prior to setting the initial acquisition
      * value.
      */
-    for (i = 0; i < fDetector->numOfAcqValues; i++) {
-        if (fDetector->acqValues[i].sync != NULL) {
-            status = fDetector->acqValues[i].sync(detChan, channel,
+    for (i = 0; i < SI_DET_NUM_OF_DEFAULT_ACQ_VALUES; i++) {
+        if (DEFAULT_ACQ_VALUES[i].sync != NULL) {
+            status = DEFAULT_ACQ_VALUES[i].sync(detChan, channel,
                                                   module, detector, defaults);
             if (status != XIA_SUCCESS) {
                 pslLog(PSL_LOG_ERROR, status,
                        "Error synchronizing '%s' for detChan %d (%u)",
-                       fDetector->acqValues[i].name, detChan, channel);
+                       DEFAULT_ACQ_VALUES[i].name, detChan, channel);
                 return status;
             }
         }
     }
 
+    /*
+     * Set all the initial values on the box.
+     */
     defaults = xiaGetDefaultFromDetChan(detChan);
 
     entry = defaults->entry;
 
     while (entry) {
         if (strlen(entry->name) > 0) {
-            AcquisitionValue* acq = psl__GetAcquisition(fDetector, entry->name);
+            const AcquisitionValue* acq = psl__GetAcquisition(entry->name);
 
             if (!acq) {
                 if (psl__AcqRemoved(entry->name)) {
@@ -7579,7 +7546,6 @@ PSL_STATIC int psl__BoardOperation(int detChan, Detector* detector, Module* modu
     int status;
     int i;
 
-    ASSERT(name);
     ASSERT(value);
 
     xiaPSLBadArgs(module, detector, "psl__BoardOperation");
@@ -8140,7 +8106,7 @@ PSL_STATIC int psl__LoadDetCharacterization(Detector *detector, Module *module)
                     ++i;
                     p += 3;
 
-                    if (strlen(p) < 3)
+                    if (strlen(p) < 2)
                         p = NULL;
                 }
 
@@ -8248,13 +8214,12 @@ PSL_STATIC int psl__SyncPixelAdvanceMode(Module *module, Detector *detector)
 {
     int status;
     const char *mode;
-    AcquisitionValue *pixel_advance_mode;
+    acqValue pixel_advance_mode;
     FalconXNDetector *fDetector = detector->pslData;
 
-    pixel_advance_mode = psl__GetAcquisition(fDetector, "pixel_advance_mode");
-    ASSERT(pixel_advance_mode);
+    pixel_advance_mode = psl__GetAcqValue(fDetector, "pixel_advance_mode");
 
-    switch(pixel_advance_mode->value.ref.i) {
+    switch(pixel_advance_mode.ref.i) {
     case (int64_t) XIA_MAPPING_CTL_USER:
         mode = "continuous";
         break;
@@ -8265,7 +8230,7 @@ PSL_STATIC int psl__SyncPixelAdvanceMode(Module *module, Detector *detector)
         status = XIA_BAD_VALUE;
         pslLog(PSL_LOG_ERROR, status,
                "invalid pixel_advance_mode value: %" PRIu64,
-               pixel_advance_mode->value.ref.i);
+               pixel_advance_mode.ref.i);
         return status;
     }
 
@@ -8281,13 +8246,12 @@ PSL_STATIC int psl__SyncPresetType(Module *module, Detector *detector)
 {
     int status;
     const char *mode;
-    AcquisitionValue *preset_type;
+    acqValue preset_type;
     FalconXNDetector *fDetector = detector->pslData;
 
-    preset_type = psl__GetAcquisition(fDetector, "preset_type");
-    ASSERT(preset_type);
+    preset_type = psl__GetAcqValue(fDetector, "preset_type");
 
-    switch(preset_type->value.ref.i) {
+    switch(preset_type.ref.i) {
     case (int64_t) XIA_PRESET_NONE:
         mode = "continuous";
         break;
@@ -8339,13 +8303,12 @@ PSL_STATIC int psl__SetHistogramMode(Module *module, Detector *detector, const c
 PSL_STATIC int psl__SyncMCARefresh(Module *module, Detector *detector)
 {
     int status;
-    AcquisitionValue *mca_refresh;
+    acqValue mca_refresh;
     FalconXNDetector *fDetector = detector->pslData;
 
-    mca_refresh = psl__GetAcquisition(fDetector, "mca_refresh");
-    ASSERT(mca_refresh);
+    mca_refresh = psl__GetAcqValue(fDetector, "mca_refresh");
 
-    status = psl__SetMCARefresh(module, detector, mca_refresh->value.ref.f);
+    status = psl__SetMCARefresh(module, detector, mca_refresh.ref.f);
     return status;
 }
 
@@ -8374,12 +8337,13 @@ PSL_STATIC int psl__SetMCARefresh(Module *module, Detector *detector, double per
 
 /*
  * Set params underlying number_mca_channels in terms of related acqs.
+ * Pass -1 for a parameter to look it up from the default. This allows
+ * calling with one known updated value (being set).
  */
-PSL_STATIC int psl__SyncNumberMCAChannels(Module *module, Detector *detector)
+PSL_STATIC int psl__SyncNumberMCAChannels(Module *module, Detector *detector,
+                                          int64_t number_mca_channels,
+                                          int64_t mca_start_channel)
 {
-    AcquisitionValue *mca_start_channel;
-    AcquisitionValue *number_mca_channels;
-
     FalconXNDetector *fDetector;
 
     int64_t highIndex;
@@ -8390,12 +8354,12 @@ PSL_STATIC int psl__SyncNumberMCAChannels(Module *module, Detector *detector)
 
     fDetector = detector->pslData;
 
-    mca_start_channel = psl__GetAcquisition(fDetector, "mca_start_channel");
-    number_mca_channels = psl__GetAcquisition(fDetector, "number_mca_channels");
-    ASSERT(mca_start_channel);
-    ASSERT(number_mca_channels);
+    if (number_mca_channels == -1)
+        number_mca_channels = psl__GetAcqValue(fDetector, "number_mca_channels").ref.i;
+    if (mca_start_channel == -1)
+        mca_start_channel = psl__GetAcqValue(fDetector, "mca_start_channel").ref.i;
 
-    highIndex = mca_start_channel->value.ref.i + number_mca_channels->value.ref.i - 1;
+    highIndex = mca_start_channel + number_mca_channels - 1;
 
     si_toro__sinc__key_value__init(&kv);
     kv.key = (char*) "histogram.binSubRegion.highIndex";
@@ -8417,8 +8381,8 @@ PSL_STATIC int psl__SyncNumberMCAChannels(Module *module, Detector *detector)
  */
 PSL_STATIC int psl__SyncGateCollectionMode(Module *module, Detector *detector)
 {
-    AcquisitionValue *input_logic_polarity;
-    AcquisitionValue *gate_ignore;
+    acqValue input_logic_polarity;
+    acqValue gate_ignore;
 
     FalconXNDetector *fDetector;
 
@@ -8428,22 +8392,20 @@ PSL_STATIC int psl__SyncGateCollectionMode(Module *module, Detector *detector)
 
     fDetector = detector->pslData;
 
-    input_logic_polarity = psl__GetAcquisition(fDetector, "input_logic_polarity");
-    gate_ignore = psl__GetAcquisition(fDetector, "gate_ignore");
-    ASSERT(input_logic_polarity);
-    ASSERT(gate_ignore);
+    input_logic_polarity = psl__GetAcqValue(fDetector, "input_logic_polarity");
+    gate_ignore = psl__GetAcqValue(fDetector, "gate_ignore");
 
     si_toro__sinc__key_value__init(&kv);
     kv.key = (char*) "gate.statsCollectionMode";
 
-    if (input_logic_polarity->value.ref.i == XIA_GATE_COLLECT_LO) {
-        if (gate_ignore->value.ref.i == 1)
+    if (input_logic_polarity.ref.i == XIA_GATE_COLLECT_LO) {
+        if (gate_ignore.ref.i == 1)
             kv.optionval = (char*) "risingEdge";
         else
             kv.optionval = (char*) "whenLow";
     }
     else { /* XIA_GATE_COLLECT_HI */
-        if (gate_ignore->value.ref.i == 1)
+        if (gate_ignore.ref.i == 1)
             kv.optionval = (char*) "fallingEdge";
         else
             kv.optionval = (char*) "whenHigh";

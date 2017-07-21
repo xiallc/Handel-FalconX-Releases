@@ -144,14 +144,12 @@ XIA_SHARED char * dxp_md_fgets(char *s, int length, FILE *stream)
 
     /*
      * Remove the new line character to keep the log file output from
-     * containing the extra white space. Replace with a space so the code that
-     * depends on the line being longer than the data the line provides does
-     * not break.
+     * containing the extra white space.
      */
     if (s[ret_len - 2] == '\n')
-      s[ret_len - 2] = ' ';
+      s[ret_len - 2] = '\0';
     if (s[ret_len - 1] == '\n')
-      s[ret_len - 1] = ' ';
+      s[ret_len - 1] = '\0';
 
     return s;
 }

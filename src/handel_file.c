@@ -32,9 +32,6 @@
  * TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF
  * THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
- *
- * $Id$
- *
  */
 
 
@@ -85,6 +82,7 @@ HANDEL_STATIC int HANDEL_API xiaGetLineData(const char *line,
 HANDEL_STATIC int HANDEL_API xiaSetPosOnNext(FILE *fp, fpos_t *start, fpos_t *end,
                                              const char *name, fpos_t *newPos,
                                              boolean_t after);
+HANDEL_SHARED int HANDEL_API xiaCopyFile(const char *src, const char *dest);
 
 HANDEL_STATIC int xiaLoadDetector(FILE *fp, fpos_t *start, fpos_t *end);
 HANDEL_STATIC int xiaLoadModule(FILE *fp, fpos_t *start, fpos_t *end);
@@ -228,6 +226,8 @@ HANDEL_STATIC int HANDEL_API xiaWriteIniFile(const char *filename)
     unsigned int j;
 
     FILE *iniFile = NULL;
+    char tmpFilename[MAX_PATH_LEN];
+    const char tmpExt[] = ".tmp";
 
     char* path = NULL;
     const char* lastSlash = NULL;
@@ -250,7 +250,15 @@ HANDEL_STATIC int HANDEL_API xiaWriteIniFile(const char *filename)
         return status;
     }
 
-    iniFile = xia_file_open(filename, "w");
+    /*
+     * Write a temp file first so we don't wreck the user's file if anything
+     * goes wrong.
+     */
+    strncpy(tmpFilename, filename, sizeof(tmpFilename) - 1);
+    strncpy(tmpFilename + strlen(filename), tmpExt,
+            sizeof(tmpFilename) - 1 - strlen(filename));
+
+    iniFile = xia_file_open(tmpFilename, "w");
     if (iniFile == NULL)
     {
         status = XIA_OPEN_FILE;
@@ -554,9 +562,66 @@ HANDEL_STATIC int HANDEL_API xiaWriteIniFile(const char *filename)
 
     xia_file_close(iniFile);
 
+    status = xiaCopyFile(tmpFilename, filename);
+    if (status == XIA_SUCCESS) {
+        remove(tmpFilename);
+    }
+    else {
+        status = XIA_BAD_FILE_WRITE;
+        xiaLog(XIA_LOG_ERROR, status, "xiaWriteIniFile",
+               "Failed to copy temp file %s to destination %s.", tmpFilename, filename);
+        return status;
+    }
+
     return XIA_SUCCESS;
 }
 
+HANDEL_SHARED int HANDEL_API xiaCopyFile(const char *src, const char *dest)
+{
+    int status;
+    FILE *srcfp = NULL, *destfp = NULL;
+    char line[XIA_LINE_LEN];
+
+    ASSERT(src);
+    ASSERT(dest);
+
+
+    xiaLog(XIA_LOG_DEBUG, "xiaCopyFile", "Copying file %s to %s", src, dest);
+
+    srcfp = xia_file_open(src, "rb");
+
+    if (srcfp == NULL) {
+        status = XIA_OPEN_FILE;
+        xiaLog(XIA_LOG_ERROR, status, "xiaCopyFile", "Could not open %s", src);
+        return status;
+    }
+
+    destfp = xia_file_open(dest, "w");
+
+    if (destfp == NULL) {
+        xia_file_close(srcfp);
+        status = XIA_OPEN_FILE;
+        xiaLog(XIA_LOG_ERROR, status, "xiaCopyFile", "Could not open %s", dest);
+        return status;
+    }
+
+    while (handel_md_fgets(line, XIA_LINE_LEN, srcfp)) {
+        int written = fprintf(destfp, "%s\n", line);
+        if (written < 0) {
+            xia_file_close(srcfp);
+            xia_file_close(destfp);
+            status = XIA_BAD_FILE_WRITE;
+            xiaLog(XIA_LOG_ERROR, status, "xiaCopyFile", "Error writing %s", dest);
+            return status;
+        }
+    }
+
+    xia_file_close(srcfp);
+    xia_file_close(destfp);
+
+    return XIA_SUCCESS;
+
+}
 
 /*****************************************************************************
  *

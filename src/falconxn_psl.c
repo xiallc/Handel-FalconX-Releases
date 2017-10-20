@@ -123,6 +123,7 @@ typedef union {
 /* The most we will print for debug SINC param values. */
 #define MAX_PARAM_STR_LEN 256
 
+#define SINC_HIST_REFRESH_DISABLE 0
 
 /* Required PSL hooks */
 PSL_STATIC int psl__IniWrite(FILE* fp, const char* section, const char* path,
@@ -178,6 +179,7 @@ PSL_STATIC int psl__LoadDetCharacterization(Detector *detector, Module *module);
 
 PSL_STATIC int psl__RefreshChannelState(Module* module, Detector* detector);
 PSL_STATIC int psl__UpdateChannelState(SiToro__Sinc__KeyValue* kv, Detector* detector);
+PSL_STATIC int psl__LoadChannelFeatures(Module* module, Detector* detector);
 
 /* Board operations */
 PSL_STATIC int psl__BoardOp_Apply(int detChan, Detector* detector, Module* module,
@@ -208,6 +210,8 @@ PSL_STATIC int psl__SetParam(Module* module, Detector* detector,
                              SiToro__Sinc__KeyValue* param);
 PSL_STATIC int psl__GetParamValue(Module* module, int channel, const char* name,
                                   int paramType, psl__SincParamValue* val);
+PSL_STATIC int psl__GetParamDetails(Module* module, int channel, const char *prefix,
+                                    SiToro__Sinc__ListParamDetailsResponse** resp);
 PSL_STATIC int psl__GetMaxNumberSca(int detChan, Module* module, int *value);
 PSL_STATIC int psl__SetDigitalConf(int detChan, Detector* detector, Module* module);
 PSL_STATIC int psl__SyncMCARefresh(Module *module, Detector *detector);
@@ -220,6 +224,8 @@ PSL_STATIC int psl__SyncNumberMCAChannels(Module *module, Detector *detector,
                                           int64_t number_mca_channels,
                                           int64_t mca_start_channel);
 PSL_STATIC int psl__SyncGateCollectionMode(Module *module, Detector *detector);
+PSL_STATIC int psl__SyncGateVetoMode(Module *module, Detector *detector);
+PSL_STATIC int psl__ClearGateVetoMode(Module *module, Detector *detector);
 
 /* Acquisition value handler */
 #define ACQ_HANDLER_DECL(_n)                                        \
@@ -965,6 +971,63 @@ PSL_STATIC int psl__RefreshChannelState(Module* module, Detector* detector)
 }
 
 /*
+ * Queries the board for features we support conditionally based on firmware.
+ * Updates the detector features state.
+ */
+PSL_STATIC int psl__LoadChannelFeatures(Module* module, Detector* detector)
+{
+    int status;
+    SiToro__Sinc__ListParamDetailsResponse* resp = NULL;
+
+    FalconXNDetector* fDetector = detector->pslData;
+
+    int i;
+
+    status = psl__DetectorLock(detector);
+    if (status != XIA_SUCCESS) {
+        pslLog(PSL_LOG_ERROR, status, "Unable to get the detector lock");
+        return status;
+    }
+
+    /* Clear feature flags. */
+    fDetector->features.mcaGateVeto = FALSE_;
+
+    psl__DetectorUnlock(detector);
+
+    /*
+     * Query parameters we need to check. Full param names, e.g.
+     * gate.veto, don't work. It has to be a prefix.
+     */
+    status = psl__GetParamDetails(module, fDetector->modDetChan, "gate", &resp);
+    if (status != XIA_SUCCESS) {
+        pslLog(PSL_LOG_ERROR, status,
+               "Unable to get param details");
+        return status;
+    }
+
+    status = psl__DetectorLock(detector);
+    if (status != XIA_SUCCESS) {
+        pslLog(PSL_LOG_ERROR, status, "Unable to get the detector lock");
+        si_toro__sinc__list_param_details_response__free_unpacked(resp, NULL);
+        return status;
+    }
+
+    for (i = 0; i < resp->n_paramdetails; i++) {
+        SiToro__Sinc__ParamDetails *paramdetails = resp->paramdetails[i];
+
+        if (strcmp("gate.veto", paramdetails->kv->key) == 0) {
+            fDetector->features.mcaGateVeto = TRUE_;
+        }
+    }
+
+    psl__DetectorUnlock(detector);
+
+    si_toro__sinc__list_param_details_response__free_unpacked(resp, NULL);
+
+    return XIA_SUCCESS;
+}
+
+/*
  * Sends a command to stop any form of data acquisition on the
  * channel. @a modChan is a module channel (SINC channel) or -1 for
  * all channels in the module.
@@ -1386,6 +1449,43 @@ PSL_STATIC int psl__SetCalibration(Module* module, Detector* detector)
     return XIA_SUCCESS;
 }
 
+PSL_STATIC int psl__GetParamDetails(Module* module, int channel, const char *prefix,
+                                    SiToro__Sinc__ListParamDetailsResponse** resp)
+{
+    int status = XIA_SUCCESS;
+
+    uint8_t    pad[256];
+    SincBuffer packet = SINC_BUFFER_INIT(pad);
+
+    Sinc_Response response;
+
+    *resp = NULL;
+
+    SincEncodeListParamDetails(&packet, channel, prefix);
+
+    status = psl__ModuleTransactionSend(module, &packet);
+    if (status != XIA_SUCCESS) {
+        pslLog(PSL_LOG_ERROR, status, "Error requesting param details");
+        return status;
+    }
+
+    response.channel = channel;
+    response.type = SI_TORO__SINC__MESSAGE_TYPE__LIST_PARAM_DETAILS_RESPONSE;
+
+    status = psl__ModuleTransactionReceive(module, &response);
+
+    if (status == XIA_SUCCESS) {
+        *resp = response.response;
+    }
+    else {
+        pslLog(PSL_LOG_ERROR, status, "Error receiving parameter");
+    }
+
+    psl__ModuleTransactionEnd(module);
+
+    return status;
+}
+
 /*
  * Set the specified acquisition value. Values are always of
  * type double.
@@ -1576,6 +1676,7 @@ ACQ_HANDLER_DECL(analog_gain)
     if (read) {
         SiToro__Sinc__GetParamResponse* resp = NULL;
         SiToro__Sinc__KeyValue*         kv;
+        double floatval = 0.0;
 
         status = psl__GetParam(module, channel, "afe.dacGain", &resp);
         if (status != XIA_SUCCESS) {
@@ -1586,10 +1687,13 @@ ACQ_HANDLER_DECL(analog_gain)
 
         kv = resp->results[0];
 
-        if (kv->has_paramtype &&
-            (kv->paramtype == SI_TORO__SINC__KEY_VALUE__PARAM_TYPE__FLOAT_TYPE)) {
-            *value = pow(16.0, (kv->floatval - 409.6) / (8.0 * 409.6));
-        } else {
+        if (kv->has_floatval) {    /* sitoro <= 0.8.4 */
+            floatval = kv->floatval;
+        }
+        else if (kv->has_intval) { /* sitoro 0.8.7+ */
+            floatval = (double) kv->intval;
+        }
+        else {
             status = XIA_BAD_VALUE;
         }
 
@@ -1600,6 +1704,8 @@ ACQ_HANDLER_DECL(analog_gain)
                    "DAC gain response");
             return status;
         }
+
+        *value = pow(16.0, (floatval - 409.6) / (8.0 * 409.6));
     }
     else {
         SiToro__Sinc__KeyValue kv;
@@ -1658,9 +1764,13 @@ ACQ_HANDLER_DECL(analog_offset)
 
         kv = resp->results[0];
 
-        if (kv->has_floatval) {
-            *value =  kv->floatval + DAC_OFFSET_MIN;
-        } else {
+        if (kv->has_floatval) {    /* sitoro <= 0.8.4 */
+            *value = kv->floatval;
+        }
+        else if (kv->has_intval) { /* sitoro 0.8.7+ */
+            *value = (double) kv->intval;
+        }
+        else {
             status = XIA_BAD_VALUE;
         }
 
@@ -1671,6 +1781,8 @@ ACQ_HANDLER_DECL(analog_offset)
                    "DAC gain response");
             return status;
         }
+
+        *value += DAC_OFFSET_MIN;
     }
     else {
         SiToro__Sinc__KeyValue kv;
@@ -3590,15 +3702,7 @@ PSL_STATIC int psl__Start_MappingMode_0(unsigned short resume,
 
     UNUSED(resume);
     UNUSED(detector);
-
-    /*
-     * Start the run one channel at a time for all channels in the module for
-     * Handel multi-channel device compatibility.
-     *
-     * Return on any error stopping all channels.
-     */
     for (channel = 0; channel < (int) module->number_of_channels; channel++) {
-
         Detector*         chanDetector;
         FalconXNDetector* fDetector;
         uint32_t          number_stats;
@@ -3632,6 +3736,15 @@ PSL_STATIC int psl__Start_MappingMode_0(unsigned short resume,
         if (status != XIA_SUCCESS) {
             pslLog(PSL_LOG_ERROR, status,
                    "Error syncing mca_refresh for starting mm0: %s:%d",
+                   module->alias, channel);
+            psl__Stop_MappingMode_0(module, chanDetector);
+            return status;
+        }
+
+        status = psl__SyncGateVetoMode(module, chanDetector);
+        if (status != XIA_SUCCESS) {
+            pslLog(PSL_LOG_ERROR, status,
+                   "Error syncing gate veto mode for starting mm0: %s:%d",
                    module->alias, channel);
             psl__Stop_MappingMode_0(module, chanDetector);
             return status;
@@ -3685,6 +3798,25 @@ PSL_STATIC int psl__Start_MappingMode_0(unsigned short resume,
         status = psl__DetectorUnlock(chanDetector);
         if (status != XIA_SUCCESS)
             return status;
+    }
+
+    /*
+     * Start the run one channel at a time for all channels in the module for
+     * Handel multi-channel device compatibility.
+     *
+     * Return on any error stopping all channels.
+     */
+    for (channel = 0; channel < (int) module->number_of_channels; channel++) {
+        Detector*         chanDetector;
+
+        chanDetector = psl__FindDetector(module, channel);
+        if (chanDetector == NULL) {
+            status = XIA_INVALID_DETCHAN;
+            pslLog(PSL_LOG_ERROR, status,
+                   "Cannot find channel %s:%d", module->alias, channel);
+            psl__Stop_MappingMode_0(module, detector);
+            return status;
+        }
 
         status = psl__StartHistogram(module, chanDetector, channel);
         if (status != XIA_SUCCESS) {
@@ -3748,10 +3880,7 @@ PSL_STATIC int psl__Start_MappingMode_1(unsigned short resume,
     UNUSED(detector);
 
     /*
-     * Start the run one channel at a time for all channels in the module for
-     * Handel multi-channel device compatibility.
-     *
-     * Return on any error stopping all channels.
+     * Update settings for mm1.
      */
     for (channel = 0; channel < (int) module->number_of_channels; channel++) {
 
@@ -3785,6 +3914,15 @@ PSL_STATIC int psl__Start_MappingMode_1(unsigned short resume,
             return status;
         }
 
+        status = psl__ClearGateVetoMode(module, chanDetector);
+        if (status != XIA_SUCCESS) {
+            pslLog(PSL_LOG_ERROR, status,
+                   "Error clearing the GATE veto for starting mm1: %s:%d",
+                   module->alias, channel);
+            psl__Stop_MappingMode_1(module, chanDetector);
+            return status;
+        }
+
         fDetector = chanDetector->pslData;
 
         number_mca_channels = psl__GetAcqValue(fDetector, "number_mca_channels");
@@ -3795,21 +3933,18 @@ PSL_STATIC int psl__Start_MappingMode_1(unsigned short resume,
 
 
         /*
-         * Set a large histogram refresh period for GATE/SYNC advance
-         * modes so we don't get periodic histogram responses. This
-         * enables the receive loop to assume all histograms are for
-         * GATE transitions.
+         * Receive histograms on mca_refresh intervals for user advance. Other
+         * disable histograms so we only receive them on GATE transitions.
          */
         if (pixel_advance_mode.ref.i == XIA_MAPPING_CTL_USER)
             status = psl__SyncMCARefresh(module, chanDetector);
         else
-            status = psl__SetMCARefresh(module, chanDetector, 999);
+            status = psl__SetMCARefresh(module, chanDetector, SINC_HIST_REFRESH_DISABLE);
 
         if (status != XIA_SUCCESS) {
             pslLog(PSL_LOG_ERROR, status,
                    "Error syncing mca_refresh for starting mm1: %s:%d",
                    module->alias, channel);
-            psl__Stop_MappingMode_1(module, chanDetector);
             return status;
         }
 
@@ -3824,7 +3959,6 @@ PSL_STATIC int psl__Start_MappingMode_1(unsigned short resume,
                 pslLog(PSL_LOG_ERROR, status,
                        "Error syncing the gate collection mode for starting mm1: %s:%d",
                        module->alias, channel);
-                psl__Stop_MappingMode_1(module, chanDetector);
                 return status;
             }
         }
@@ -3841,7 +3975,6 @@ PSL_STATIC int psl__Start_MappingMode_1(unsigned short resume,
             psl__DetectorUnlock(chanDetector);
             pslLog(PSL_LOG_ERROR, status,
                    "Error closing the last mapping mode control");
-            psl__Stop_MappingMode_0(module, detector);
             return status;
         }
 
@@ -3857,7 +3990,6 @@ PSL_STATIC int psl__Start_MappingMode_1(unsigned short resume,
             psl__DetectorUnlock(chanDetector);
             pslLog(PSL_LOG_ERROR, status,
                    "Error opening the mapping mode control");
-            psl__Stop_MappingMode_1(module, detector);
             return status;
         }
 
@@ -3874,6 +4006,25 @@ PSL_STATIC int psl__Start_MappingMode_1(unsigned short resume,
         status = psl__DetectorUnlock(chanDetector);
         if (status != XIA_SUCCESS)
             return status;
+    }
+
+    /*
+     * Start the run one channel at a time for all channels in the module for
+     * Handel multi-channel device compatibility.
+     *
+     * Return on any error stopping all channels.
+     */
+    for (channel = 0; channel < (int) module->number_of_channels; channel++) {
+        Detector*         chanDetector;
+
+        chanDetector = psl__FindDetector(module, channel);
+        if (chanDetector == NULL) {
+            status = XIA_INVALID_DETCHAN;
+            pslLog(PSL_LOG_ERROR, status,
+                   "Cannot find channel %s:%d", module->alias, channel);
+            psl__Stop_MappingMode_1(module, detector);
+            return status;
+        }
 
         status = psl__StartHistogram(module, chanDetector, channel);
         if (status != XIA_SUCCESS) {
@@ -6524,11 +6675,29 @@ PSL_STATIC int psl__ReceiveCalculateDCOffset(Module* module, SincBuffer* packet)
 
 PSL_STATIC int psl__ReceiveListParamDetails(Module* module, SincBuffer* packet)
 {
-    UNUSED(module);
-    UNUSED(packet);
+    int status;
+    SincError se;
+    int channel = -1;
+    SiToro__Sinc__ListParamDetailsResponse* resp;
 
-    pslLog(PSL_LOG_INFO, "No decoder");
-    return XIA_SUCCESS;
+    FalconXNModule* fModule = module->pslData;
+
+    status = SincDecodeListParamDetailsResponse(&se, packet, &resp, &channel);
+    if (status != true) {
+        status =  falconXNSincErrorToHandel(&se);
+        psl__ModuleStatusResponse(module, status);
+        pslLog(PSL_LOG_ERROR, status,
+               "Decode from FalconXN connection failed: %s:%d",
+               fModule->hostAddress, fModule->portBase);
+        return status;
+    }
+
+    pslLog(PSL_LOG_DEBUG, "Received %zu param details for %s:%d",
+           resp->n_paramdetails, module->alias, resp->channelid);
+
+    return psl__ModuleResponse(module, channel,
+                               SI_TORO__SINC__MESSAGE_TYPE__LIST_PARAM_DETAILS_RESPONSE,
+                               resp);
 }
 
 PSL_STATIC int psl__ReceiveParamUpdated(Module* module, SincBuffer* packet)
@@ -7315,6 +7484,17 @@ PSL_STATIC int psl__SetupDetChan(int detChan, Detector *detector, Module *module
                    "Unable to stop any running data acquisition modes");
             return status;
         }
+    }
+
+    status = psl__LoadChannelFeatures(module, detector);
+    if (status != XIA_SUCCESS) {
+        detector->pslData = NULL;
+        handel_md_event_destroy(&fDetector->asyncEvent);
+        handel_md_mutex_destroy(&fDetector->lock);
+        handel_md_free(fDetector);
+        pslLog(PSL_LOG_ERROR, status,
+               "Unable to get channel features");
+        return status;
     }
 
     status = psl__MonitorChannel(module, detector);
@@ -8377,7 +8557,7 @@ PSL_STATIC int psl__SyncNumberMCAChannels(Module *module, Detector *detector,
 }
 
 /*
- * Combine XMAP-style gate collection values into one SINC param.
+ * Combine XMAP-style gate collection values into one SINC param for mapping mode.
  */
 PSL_STATIC int psl__SyncGateCollectionMode(Module *module, Detector *detector)
 {
@@ -8415,6 +8595,88 @@ PSL_STATIC int psl__SyncGateCollectionMode(Module *module, Detector *detector)
     if (status != XIA_SUCCESS) {
         pslLog(PSL_LOG_ERROR, status,
                "Unable to set the gate collection mode");
+        return status;
+    }
+
+    return XIA_SUCCESS;
+}
+
+/*
+ * Combine XMAP-style gate collection values into one SINC param for MCA mode GATE veto.
+ */
+PSL_STATIC int psl__SyncGateVetoMode(Module *module, Detector *detector)
+{
+    acqValue input_logic_polarity;
+    acqValue gate_ignore;
+
+    FalconXNDetector *fDetector;
+
+    SiToro__Sinc__KeyValue kv;
+
+    int status;
+
+    fDetector = detector->pslData;
+
+    if (!fDetector->features.mcaGateVeto) {
+        pslLog(PSL_LOG_INFO, "gate.veto is not supported by the connected firmware. Ignoring.");
+        return XIA_SUCCESS;
+    }
+
+    input_logic_polarity = psl__GetAcqValue(fDetector, "input_logic_polarity");
+    gate_ignore = psl__GetAcqValue(fDetector, "gate_ignore");
+
+    si_toro__sinc__key_value__init(&kv);
+    kv.key = (char*) "gate.veto";
+
+    if (gate_ignore.ref.i == 1) {
+        kv.optionval = (char*) "off";
+    }
+    else {
+        /* The veto value is the opposite of "active when". */
+        if (input_logic_polarity.ref.i == XIA_GATE_COLLECT_LO)
+            kv.optionval = (char*) "whenHigh";
+        else
+            kv.optionval = (char*) "whenLow";
+    }
+
+    status = psl__SetParam(module, detector, &kv);
+    if (status != XIA_SUCCESS) {
+        pslLog(PSL_LOG_ERROR, status,
+                "Unable to set the gate veto mode.");
+        return status;
+    }
+
+    return XIA_SUCCESS;
+}
+
+/*
+ * Sets gate.veto=off. gate.veto and histogram.mode=gating for gated
+ * pixel advance are incompatible. Clear the gate veto before any
+ * mapping mode run.
+ */
+PSL_STATIC int psl__ClearGateVetoMode(Module *module, Detector *detector)
+{
+    FalconXNDetector *fDetector;
+
+    SiToro__Sinc__KeyValue kv;
+
+    int status;
+
+    fDetector = detector->pslData;
+
+    if (!fDetector->features.mcaGateVeto) {
+        pslLog(PSL_LOG_INFO, "gate.veto is not supported by the connected firmware. Ignoring.");
+        return XIA_SUCCESS;
+    }
+
+    si_toro__sinc__key_value__init(&kv);
+    kv.key = (char*) "gate.veto";
+    kv.optionval = (char*) "off";
+
+    status = psl__SetParam(module, detector, &kv);
+    if (status != XIA_SUCCESS) {
+        pslLog(PSL_LOG_ERROR, status,
+                "Unable to set the gate veto mode.");
         return status;
     }
 

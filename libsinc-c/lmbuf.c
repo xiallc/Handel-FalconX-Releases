@@ -22,6 +22,7 @@
 #define LMBUF_INITIAL_SIZE 65536
 #define LMBUF_GET_WORD(buf, offset) ( memcpy(&val_u32, ((uint8_t *)(buf)) + ((offset) * sizeof(val_u32)), sizeof(val_u32)), val_u32 )
 #define LMBUF_SIGN_EXTEND_24_TO_32(v) (((v) & 0x00800000) ? (((v) & 0x7fffff) | 0xff800000) : ((v) & 0x7fffff))
+#define LMBUF_READ_AHEAD 5
 
 
 /*
@@ -62,7 +63,7 @@ void LmBufClose(LmBuf *lm)
 
 
 /*
- * NAME:        LmBufClose
+ * NAME:        LmBufClear
  * ACTION:      Clears an LmBuf, emptying the contents but keeping the buffer memory ready.
  * PARAMETERS:  LmBuf *lm - the list mode buffer.
  */
@@ -129,10 +130,11 @@ static bool LmBufExpand(LmBuf *lm, size_t minSize)
 
     /* Use the next higher power of two as the new size. */
     size_t newSize = HigherPowerOfTwo((uint32_t)minSize);
-    lm->buf = realloc(lm->buf, newSize);
-    if (lm->buf == NULL)
+    uint8_t *mem = realloc(lm->buf, newSize);
+    if (mem == NULL)
         return false;
 
+    lm->buf = mem;
     lm->bufSize = newSize;
 
     return true;
@@ -278,6 +280,51 @@ bool LmBufGetJsonHeader(LmBuf *lm, char **data, size_t *len, bool *invalidHeader
 
 
 /*
+ * NAME:        checkOptionalItems
+ * ACTION:      Checks to see if an optional gate veto item is present before
+ *              the timestamp in a packet.
+ */
+
+static bool checkOptionalItems(uint8_t *bufPos, int offset, uint8_t flagByte, uint8_t flagSkipMax, uint32_t *vetoValue, unsigned int *timestampOffset, bool *corrupted, unsigned int *packetBytes, size_t bufBytes)
+{
+    uint32_t val_u32;
+    *vetoValue = 0;
+    *timestampOffset = offset;
+
+    /* If it's already corrupted don't look for this optional item. */
+    if (*corrupted)
+    {
+        return false;
+    }
+
+    /* Check for the optional word. */
+    if ( (LMBUF_GET_WORD(bufPos, offset) >> 24) != flagByte)
+        return false;
+
+    /* Optional word was found. */
+    *packetBytes += sizeof(uint32_t);
+    if (bufBytes < *packetBytes)
+        return false;
+
+    *vetoValue = LMBUF_GET_WORD(bufPos, offset) & 0xffffff;
+    offset++;
+
+    /* Skip past any unused items which may be added in the future. */
+    flagByte++;
+    while (bufBytes < *packetBytes && flagByte < flagSkipMax && (LMBUF_GET_WORD(bufPos, offset) >> 24) == flagByte)
+    {
+        flagByte++;
+        offset++;
+        *packetBytes += sizeof(uint32_t);
+    }
+
+    *timestampOffset = offset;
+
+    return true;
+}
+
+
+/*
  * NAME:        LmBufGetNextPacket
  * ACTION:      Gets the next available packet from the buffer. If no
  *              packet is available it returns false.
@@ -299,6 +346,8 @@ bool LmBufGetNextPacket(LmBuf *lm, LmPacket *packet)
     char         errorMessage[160] = "error";
     unsigned int packetBytes = sizeof(uint32_t);
     uint32_t     val_u32;
+    uint32_t     vetoValue = 0;
+    unsigned int timestampOffset = 0;
 
     /* Get a valid packet type. */
     do
@@ -369,7 +418,7 @@ bool LmBufGetNextPacket(LmBuf *lm, LmPacket *packet)
 
     case 0xa: /* Gated statistics data. */
         packetBytes = sizeof(uint32_t) * 11;
-        if (bufBytes < packetBytes)
+        if (bufBytes < packetBytes + sizeof(uint32_t) * LMBUF_READ_AHEAD)
             return false;
 
         /* Check integrity. */
@@ -382,7 +431,11 @@ bool LmBufGetNextPacket(LmBuf *lm, LmPacket *packet)
             }
         }
 
-        if ( !corrupted && (LMBUF_GET_WORD(bufPos, 10) >> 24) != 0xaf)
+        /* Optional veto sample count. */
+        checkOptionalItems(bufPos, 10, 0xaa, 0xaf, &vetoValue, &timestampOffset, &corrupted, &packetBytes, bufBytes);
+
+        /* Check for timestamp. */
+        if ( !corrupted && (LMBUF_GET_WORD(bufPos, timestampOffset) >> 24) != 0xaf)
         {
             corrupted = true;
             sprintf(errorMessage, "gated stats incomplete at word 10");
@@ -402,7 +455,9 @@ bool LmBufGetNextPacket(LmBuf *lm, LmPacket *packet)
         {
             packet->p.gatedStats.counter[i] = LMBUF_GET_WORD(bufPos, i+6) & 0x00ffffff;
         }
-        packet->p.gatedStats.timestamp = LMBUF_GET_WORD(bufPos, 10) & 0x00ffffff;
+
+        packet->p.gatedStats.vetoSampleCount = vetoValue;
+        packet->p.gatedStats.timestamp = LMBUF_GET_WORD(bufPos, timestampOffset) & 0x00ffffff;
 
         lm->bufTail += packetBytes;
         lm->srcTailPos += packetBytes;
@@ -410,7 +465,7 @@ bool LmBufGetNextPacket(LmBuf *lm, LmPacket *packet)
 
     case 0xb: /* Spatial statistics. */
         packetBytes = sizeof(uint32_t) * 11;
-        if (bufBytes < packetBytes)
+        if (bufBytes < packetBytes + sizeof(uint32_t) * LMBUF_READ_AHEAD)
             return false;
 
         /* Check integrity. */
@@ -423,7 +478,11 @@ bool LmBufGetNextPacket(LmBuf *lm, LmPacket *packet)
             }
         }
 
-        if ( !corrupted && (LMBUF_GET_WORD(bufPos, 10) >> 24) != 0xbf)
+        /* Optional veto sample count. */
+        checkOptionalItems(bufPos, 10, 0xba, 0xbf, &vetoValue, &timestampOffset, &corrupted, &packetBytes, bufBytes);
+
+        /* Check for timestamp. */
+        if ( !corrupted && (LMBUF_GET_WORD(bufPos, timestampOffset) >> 24) != 0xbf)
         {
             corrupted = true;
             sprintf(errorMessage, "spatial stats incomplete at word 10");
@@ -443,7 +502,9 @@ bool LmBufGetNextPacket(LmBuf *lm, LmPacket *packet)
         {
             packet->p.spatialStats.counter[i] = LMBUF_GET_WORD(bufPos, i+6) & 0x00ffffff;
         }
-        packet->p.spatialStats.timestamp = LMBUF_GET_WORD(bufPos, 10) & 0x00ffffff;
+
+        packet->p.spatialStats.vetoSampleCount = vetoValue;
+        packet->p.spatialStats.timestamp = LMBUF_GET_WORD(bufPos, timestampOffset) & 0x00ffffff;
 
         lm->bufTail += packetBytes;
         lm->srcTailPos += packetBytes;
@@ -497,7 +558,7 @@ bool LmBufGetNextPacket(LmBuf *lm, LmPacket *packet)
 
     case 0xe: /* Periodic statistics. */
         packetBytes = sizeof(uint32_t) * 10;
-        if (bufBytes < packetBytes)
+        if (bufBytes < packetBytes + sizeof(uint32_t) * LMBUF_READ_AHEAD)
             return false;
 
         /* Check integrity. */
@@ -513,7 +574,11 @@ bool LmBufGetNextPacket(LmBuf *lm, LmPacket *packet)
             }
         }
 
-        if ( !corrupted && (LMBUF_GET_WORD(bufPos, 9) >> 24) != 0xef)
+        /* Optional veto sample count. */
+        checkOptionalItems(bufPos, 9, 0xea, 0xef, &vetoValue, &timestampOffset, &corrupted, &packetBytes, bufBytes);
+
+        /* Check for timestamp. */
+        if ( !corrupted && (LMBUF_GET_WORD(bufPos, timestampOffset) >> 24) != 0xef)
         {
             corrupted = true;
             sprintf(errorMessage, "periodic stats incomplete at word 9");
@@ -533,7 +598,9 @@ bool LmBufGetNextPacket(LmBuf *lm, LmPacket *packet)
         {
             packet->p.periodicStats.counter[i] = LMBUF_GET_WORD(bufPos, i+5) & 0x00ffffff;
         }
-        packet->p.periodicStats.timestamp = LMBUF_GET_WORD(bufPos, 9) & 0x00ffffff;
+
+        packet->p.periodicStats.vetoSampleCount = vetoValue;
+        packet->p.periodicStats.timestamp = LMBUF_GET_WORD(bufPos, timestampOffset) & 0x00ffffff;
 
         lm->bufTail += packetBytes;
         lm->srcTailPos += packetBytes;
@@ -579,7 +646,7 @@ bool LmBufGetNextPacket(LmBuf *lm, LmPacket *packet)
         /* Invalid packet. */
         int errBytesWritten = 0;
         char *errPos = packet->p.error.message;
-        errPos += sprintf(packet->p.error.message, "%s at offset %ld:", errorMessage, lm->srcTailPos);
+        errPos += sprintf(packet->p.error.message, "%s at offset %zu:", errorMessage, lm->srcTailPos);
 
         for (i = 0; i < packetBytes; i++)
         {
@@ -658,7 +725,7 @@ int LmBufTranslatePacketSimple(char *textBuf, int textBufLen, LmPacket *packet, 
 
     case LmPacketTypeGatedStats:
         bytesWritten = snprintf(textBuf, (size_t)textBufLen,
-               "gatedStats %d %d %d %d %d %d %d %d %d %d",
+               "gatedStats %d %d %d %d %d %d %d %d %d %d %d",
                packet->p.gatedStats.sampleCount,
                packet->p.gatedStats.erasedSampleCount,
                packet->p.gatedStats.saturatedSampleCount,
@@ -668,6 +735,7 @@ int LmBufTranslatePacketSimple(char *textBuf, int textBufLen, LmPacket *packet, 
                packet->p.gatedStats.counter[1],
                packet->p.gatedStats.counter[2],
                packet->p.gatedStats.counter[3],
+               packet->p.gatedStats.vetoSampleCount,
                packet->p.gatedStats.timestamp);
         packetLen = sizeof(uint32_t) * 9;
         break;
@@ -687,7 +755,7 @@ int LmBufTranslatePacketSimple(char *textBuf, int textBufLen, LmPacket *packet, 
 
     case LmPacketTypeSpatialStats:
         bytesWritten = snprintf(textBuf, (size_t)textBufLen,
-               "spatialStats %d %d %d %d %d %d %d %d %d %d",
+               "spatialStats %d %d %d %d %d %d %d %d %d %d %d",
                packet->p.spatialStats.sampleCount,
                packet->p.spatialStats.erasedSampleCount,
                packet->p.spatialStats.saturatedSampleCount,
@@ -697,13 +765,14 @@ int LmBufTranslatePacketSimple(char *textBuf, int textBufLen, LmPacket *packet, 
                packet->p.spatialStats.counter[1],
                packet->p.spatialStats.counter[2],
                packet->p.spatialStats.counter[3],
+               packet->p.spatialStats.vetoSampleCount,
                packet->p.spatialStats.timestamp);
         packetLen = sizeof(uint32_t) * 9;
         break;
 
     case LmPacketTypePeriodicStats:
         bytesWritten = snprintf(textBuf, (size_t)textBufLen,
-               "periodicStats %d %d %d %d %d %d %d %d %d %d",
+               "periodicStats %d %d %d %d %d %d %d %d %d %d %d",
                packet->p.periodicStats.sampleCount,
                packet->p.periodicStats.erasedSampleCount,
                packet->p.periodicStats.saturatedSampleCount,
@@ -713,6 +782,7 @@ int LmBufTranslatePacketSimple(char *textBuf, int textBufLen, LmPacket *packet, 
                packet->p.periodicStats.counter[1],
                packet->p.periodicStats.counter[2],
                packet->p.periodicStats.counter[3],
+               packet->p.periodicStats.vetoSampleCount,
                packet->p.periodicStats.timestamp);
         packetLen = sizeof(uint32_t) * 8;
         break;
@@ -803,7 +873,7 @@ int LmBufTranslatePacketComplex(char *textBuf, int textBufLen, LmPacket *packet,
     if (hexDump && packetLen > 0)
     {
         static size_t addr = 0;
-        snprintf(bpos, (size_t)bufLen, "   %08lx: ", addr);
+        snprintf(bpos, (size_t)bufLen, "   %08zu: ", addr);
         bytesWritten = (int)strlen(bpos);
         bpos += bytesWritten;
         bufLen -= bytesWritten;

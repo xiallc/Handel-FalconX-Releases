@@ -16,10 +16,19 @@
 #include <stdbool.h>
 #include <errno.h>
 #include <math.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
 
 #ifndef _WIN32
 #include <arpa/inet.h>
+#include <float.h> // LDBL_DIG should be defined in float.h.
 #endif
+
+#ifndef LDBL_DIG
+    #define LDBL_DIG 17 // LDBL_DIG is used to guarantee that there is no precision loss
+                        // when converting from double to string and back again.
+#endif
+
 
 #include "sinc.h"
 #include "sinc_internal.h"
@@ -168,7 +177,12 @@ static char *storeDeviceSettingsString(struct DeviceSettings *settings, const ch
     if (settings->numStrings >= settings->stringsAllocated)
     {
         int newStringsAllocated = settings->stringsAllocated * 2;
-        settings->strings = realloc(settings->strings, (size_t)newStringsAllocated * sizeof(char *));
+        char **mem = realloc(settings->strings, (size_t)newStringsAllocated * sizeof(char *));
+        if (mem == NULL)
+            return NULL;
+
+        settings->strings = mem;
+
         for (i = settings->stringsAllocated; i < newStringsAllocated; i++)
         {
             settings->strings[i] = NULL;
@@ -179,6 +193,9 @@ static char *storeDeviceSettingsString(struct DeviceSettings *settings, const ch
 
     /* Store the string in a newly allocated bit of memory. */
     strBuf = malloc(strlen(str) + 1);
+    if (strBuf == NULL)
+        return NULL;
+
     strcpy(strBuf, str);
     settings->strings[settings->numStrings] = strBuf;
     settings->numStrings++;
@@ -237,6 +254,7 @@ static bool readFileAsString(Sinc *sc, char **fileText, const char *fileName)
     // Read the file.
     if (fread(readBuf, 1, fileSize, f) != fileSize)
     {
+        free(readBuf);
         SincReadErrorSetMessage(sc, SI_TORO__SINC__ERROR_CODE__READ_FAILED, "can't read file");
         return false;
     }
@@ -369,7 +387,12 @@ static void addParamToSettings(SiToro__Sinc__ParamDetails *pd, struct DeviceSett
         /* Expand the parameters vector. */
         int i;
         int newParamsAllocated = settings->paramsAllocated * 2;
-        settings->params = realloc(settings->params, (size_t)newParamsAllocated * sizeof(SiToro__Sinc__KeyValue));
+        SiToro__Sinc__KeyValue *mem = realloc(settings->params, (size_t)newParamsAllocated * sizeof(SiToro__Sinc__KeyValue));
+
+        if (mem == NULL)
+            return;
+
+        settings->params = mem;
 
         for (i = settings->paramsAllocated; i < newParamsAllocated; i++)
         {
@@ -387,6 +410,8 @@ static void addParamToSettings(SiToro__Sinc__ParamDetails *pd, struct DeviceSett
     }
 
     kv->key = storeDeviceSettingsString(settings, key);
+    if (kv->key == NULL)
+        return;
 
     switch (pd->kv->paramtype)
     {
@@ -411,11 +436,15 @@ static void addParamToSettings(SiToro__Sinc__ParamDetails *pd, struct DeviceSett
     case SI_TORO__SINC__KEY_VALUE__PARAM_TYPE__STRING_TYPE:
         /* String. */
         kv->strval = storeDeviceSettingsString(settings, valStr);
+        if (kv->strval == NULL)
+            return;
         break;
 
     case SI_TORO__SINC__KEY_VALUE__PARAM_TYPE__OPTION_TYPE:
         /* Option. */
         kv->optionval = storeDeviceSettingsString(settings, valStr);
+        if (kv->optionval == NULL)
+            return;
         break;
 
     default:
@@ -471,7 +500,14 @@ static bool traverseJsonCalibrationVector(Sinc *sc, const char *jsonStr, jsmntok
         Base64Decode(calibStr64, strlen(calibStr64), calibBin, &calibBinLen);
 
         /* Put it in the calibration settings. */
-        cc->calibrationData.data = calloc(calibBinLen, 1);
+        uint8_t *mem = calloc(calibBinLen, 1);
+        if (mem == NULL)
+        {
+            SincReadErrorSetCode(sc, SI_TORO__SINC__ERROR_CODE__OUT_OF_MEMORY);
+            return false;
+        }
+
+        cc->calibrationData.data = mem;
         memcpy(cc->calibrationData.data, calibBin, calibBinLen);
         cc->calibrationData.len = (int)calibBinLen;
     }
@@ -779,6 +815,12 @@ static bool traverseJsonInstrumentParam(Sinc *sc, const char *jsonStr, jsmntok_t
 
 static bool traverseJsonTopLevel(Sinc *sc, const char *jsonStr,  jsmntok_t *tokens, int *tokPos, SiToro__Sinc__ListParamDetailsResponse *deviceParams, struct DeviceSettings *settings)
 {
+    if (tokPos == NULL)
+    {
+        SincReadErrorSetCode(sc, SI_TORO__SINC__ERROR_CODE__INVALID_REQUEST);
+        return false;
+    }
+
     int i;
     jsmntok_t *tok = &tokens[*tokPos];
     (*tokPos)++;
@@ -903,8 +945,8 @@ bool SincProjectLoad(Sinc *sc, const char *fileName)
         free(tokens);
         return false;
     }
-    
-    free(tokens);    
+
+    free(tokens);
 
     // Set the new settings.
     if (!setDeviceSettings(sc, &settings))
@@ -1004,7 +1046,7 @@ static void saveSincPlot(FILE *jsonFile, const char *key, SincCalibrationPlot *p
         }
         else
         {
-            fprintf(jsonFile, "%.16f", plot->y[i]);
+            fprintf(jsonFile, "%.*g", LDBL_DIG, plot->y[i]);
         }
 
         if (i < plot->len - 1)
@@ -1058,7 +1100,7 @@ static void saveKeyValue(FILE *jsonFile, SiToro__Sinc__KeyValue *kv, int indent,
         }
         else
         {
-            fprintf(jsonFile, "%.16f", kv->floatval);
+            fprintf(jsonFile, "%.*g", LDBL_DIG, kv->floatval);
         }
         break;
     }
@@ -1091,6 +1133,7 @@ static void saveKeyValue(FILE *jsonFile, SiToro__Sinc__KeyValue *kv, int indent,
         break;
 
     default:
+        fprintf(jsonFile, "null");
         break;
     }
 
@@ -1222,7 +1265,7 @@ static void saveChannel(FILE *jsonFile, SiToro__Sinc__ListParamDetailsResponse *
             saveKeyValue(jsonFile, pd->kv, 3, i < last);
         }
 
-        if (calibLoc == i)
+        if (calibLoc == i && calibData->data != NULL)
         {
             /* Output the calibration data. */
             char calibDataStr[1024];
@@ -1334,8 +1377,12 @@ bool SincProjectSave(Sinc *sc, const char *fileName)
         if (!SincListParamDetails(sc, i, (char *)"", &pdResp))
             goto errorExit;
 
+        calibData.data = NULL;
+        calibData.len = 0;
         if (!SincGetCalibration(sc, i, &calibData, &example, &model, &final))
-            goto errorExit;
+        {
+            calibData.data = NULL;
+        }
 
         /* Save this channel's data. */
         saveChannel(jsonFile, pdResp, &calibData, &example, &model, &final, i, i < numChannels-1);

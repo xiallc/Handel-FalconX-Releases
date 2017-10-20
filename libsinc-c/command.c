@@ -17,8 +17,7 @@
 
 
 /* Forward declarations. */
-int SincSendAndCheckSuccess(Sinc *sc, ProtobufCBufferSimple *sendBuf);
-bool SincStartCalibration(Sinc *sc, int channelId);
+int SincSendAndCheckSuccess(Sinc *sc, SincBuffer *sendBuf);
 
 
 /*
@@ -60,7 +59,7 @@ bool SincCheckSuccess(Sinc *sc)
  *                  SincStrError() to get the error status.
  */
 
-int SincSendAndCheckSuccess(Sinc *sc, ProtobufCBufferSimple *sendBuf)
+int SincSendAndCheckSuccess(Sinc *sc, SincBuffer *sendBuf)
 {
     // Send it.
     if (!SincSend(sc, sendBuf))
@@ -96,8 +95,7 @@ bool SincPing(Sinc *sc, int showOnConsole)
  * ACTION:      Gets a named parameter from the device.
  * PARAMETERS:  Sinc *sc                 - the channel to request from.
  *              int channelId            - which channel to use. -1 to use the default channel for this port.
- *              char *name               - the name of the parameter to get. "channel.allSettings" provides
- *                  a JSON list of all the available parameters and their values.
+ *              char *name               - the name of the parameter to get.
  *              SiToro__Sinc__GetParamResponse **resp - where to put the response received.
  *
  *                  (*resp)->results[0] will contain the result as a SiToro__Sinc__KeyValue.
@@ -373,12 +371,25 @@ bool SincProbeDatagram(Sinc *sc, bool *datagramsOk)
 
     while (!readOk[0])
     {
+        // Check for multiple threads waiting.
+        if (sc->inSocketWait)
+        {
+            SincReadErrorSetCode(sc, SI_TORO__SINC__ERROR_CODE__MULTIPLE_THREAD_WAIT);
+            return false;
+        }
+
+        sc->inSocketWait = true;
+
         // Wait for something to happen.
         fds[0] = sc->fd;
         fds[1] = sc->datagramFd;
         readOk[0] = false;
         readOk[1] = false;
+
         err = SincSocketWaitMulti(fds, 2, sc->timeout, readOk);
+
+        sc->inSocketWait = false;
+
         if (err != (int)SI_TORO__SINC__ERROR_CODE__NO_ERROR)
         {
             SincReadErrorSetMessage(sc, (SiToro__Sinc__ErrorCode)err, "can't read histogram probe datagram");
@@ -388,8 +399,8 @@ bool SincProbeDatagram(Sinc *sc, bool *datagramsOk)
         if (readOk[1])
         {
             // Read the datagram.
-            buflen = sc->readBuf.alloced;
-            err = SincSocketReadDatagram(sc->datagramFd, sc->readBuf.data, &buflen, true);
+            buflen = sc->readBuf.cbuf.alloced;
+            err = SincSocketReadDatagram(sc->datagramFd, sc->readBuf.cbuf.data, &buflen, true);
             if (err != (int)SI_TORO__SINC__ERROR_CODE__NO_ERROR)
             {
                 // Got an error.
@@ -402,6 +413,8 @@ bool SincProbeDatagram(Sinc *sc, bool *datagramsOk)
             }
         }
     }
+
+    sc->inSocketWait = false;
 
     // Get the response.
     return SincCheckSuccess(sc);
@@ -674,6 +687,29 @@ bool SincResetSpatialSystem(Sinc *sc)
 
 
 /*
+ * NAME:        SincTriggerHistogram
+ * ACTION:      Manually triggers a single histogram data collection if:
+ *                  * histogram.mode is "gated".
+ *                  * gate.source is "software".
+ *                  * gate.statsCollectionMode is "always".
+ *                  * histograms must be started first using SincStartHistogram().
+ * PARAMETERS:  Sinc *sc      - the sinc connection.
+ * RETURNS:     true on success, false otherwise. On failure use SincCurrentErrorCode() and
+ *                  SincCurrentErrorMessage() to get the error status.
+ */
+
+bool SincTriggerHistogram(Sinc *sc)
+{
+    // Send the request.
+    if (!SincRequestTriggerHistogram(sc))
+        return false;
+
+    // Get the response.
+    return SincCheckSuccess(sc);
+}
+
+
+/*
  * NAME:        SincSoftwareUpdate
  * ACTION:      Updates the software on the device.
  * PARAMETERS:  Sinc *sc         - the sinc connection.
@@ -705,17 +741,35 @@ bool SincSoftwareUpdate(Sinc *sc, uint8_t *appImage, int appImageLen, char *appC
 
 /*
  * NAME:        SincSaveConfiguration
- * ACTION:      Saves the channel's current configuration to use as default settings on startup.
- * PARAMETERS:  Sinc *sc         - the sinc connection.
- *              int channelId    - which channel to use. -1 to use the default channel for this port.
- * RETURNS:     true on success, false otherwise. On failure use SincErrno() and
- *                  SincStrError() to get the error status.
+ * ACTION:      Saves the board's current configuration to use as default settings on startup.
+ * PARAMETERS:  Sinc *sc          - the sinc connection.
+ * RETURNS:     true on success, false otherwise. On failure use SincCurrentErrorCode() and
+ *                  SincCurrentErrorMessage() to get the error status.
  */
 
-bool SincSaveConfiguration(Sinc *sc, int channelId)
+bool SincSaveConfiguration(Sinc *sc)
 {
     // Send the request.
-    if (!SincRequestSaveConfiguration(sc, channelId))
+    if (!SincRequestSaveConfiguration(sc))
+        return false;
+
+    // Get the response.
+    return SincCheckSuccess(sc);
+}
+
+
+/*
+ * NAME:        SincDeleteSavedConfiguration
+ * ACTION:      Deletes any saved configuration to return to system defaults on the next startup.
+ * PARAMETERS:  Sinc *sc          - the sinc connection.
+ * RETURNS:     true on success, false otherwise. On failure use SincCurrentErrorCode() and
+ *                  SincCurrentErrorMessage() to get the error status.
+ */
+
+bool SincDeleteSavedConfiguration(Sinc *sc)
+{
+    // Send the request.
+    if (!SincRequestDeleteSavedConfiguration(sc))
         return false;
 
     // Get the response.
@@ -769,4 +823,30 @@ bool SincCheckParamConsistency(Sinc *sc, int channelId, SiToro__Sinc__CheckParam
 
     // Handle errors and clean up.
     return SincInterpretSuccess(sc, (*resp)->success);
+}
+
+
+/*
+ * NAME:        SincDownloadCrashDump
+ * ACTION:      Downloads the most recent crash dump, if one exists.
+ * PARAMETERS:  Sinc *sc         - the sinc connection.
+ *              bool *newDump      - set true if this crash dump is new.
+ *              uint8_t **dumpData - where to put a pointer to the newly allocated crash dump data.
+ *                                   This should be free()d after use.
+ *              size_t *dumpSize   - where to put the size of the crash dump data.
+ * RETURNS:     true on success, false otherwise. On failure use SincCurrentErrorCode() and
+ *                  SincCurrentErrorMessage() to get the error status.
+ */
+
+bool SincDownloadCrashDump(Sinc *sc, bool *newDump, uint8_t **dumpData, size_t *dumpSize)
+{
+    // Send the request.
+    if (!SincRequestDownloadCrashDump(sc))
+        return false;
+
+    // Wait for the response.
+    if (!SincReadDownloadCrashDumpResponse(sc, sc->timeout, newDump, dumpData, dumpSize))
+        return false;
+
+    return true;
 }

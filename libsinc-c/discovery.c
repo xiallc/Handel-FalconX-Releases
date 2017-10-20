@@ -30,6 +30,7 @@
 
 static int DiscoverFindNetworkInterfaces(Discover *d)
 {
+    /* XXX - change to use getifaddrs()? */
     /* Create a socket. */
     struct ifconf ifc;
     struct ifreq *ifr;
@@ -38,15 +39,6 @@ static int DiscoverFindNetworkInterfaces(Discover *d)
 
     int s = socket(AF_INET, SOCK_DGRAM, 0);
     if (s < 0)
-    {
-        DiscoverSetErrno(d, SI_TORO__SINC__ERROR_CODE__OUT_OF_RESOURCES);
-        return false;
-    }
-
-    /* Get the list of interfaces. */
-    ifc.ifc_len = sizeof(buf);
-    ifc.ifc_buf = buf;
-    if (ioctl(s, SIOCGIFCONF, &ifc) < 0)
     {
         DiscoverSetErrno(d, SI_TORO__SINC__ERROR_CODE__OUT_OF_RESOURCES);
         return false;
@@ -439,6 +431,8 @@ void DiscoverSetErrno(Discover *d, int errNo)
     case SI_TORO__SINC__ERROR_CODE__DEVICE_ERROR:                 DiscoverSetErrStr(d, errNo, "device error"); break;
     case SI_TORO__SINC__ERROR_CODE__INVALID_REQUEST:              DiscoverSetErrStr(d, errNo, "invalid request"); break;
     case SI_TORO__SINC__ERROR_CODE__NON_GATED_HISTOGRAM_DISABLED: DiscoverSetErrStr(d, errNo, "non-gated histogram disabled"); break;
+    case SI_TORO__SINC__ERROR_CODE__NOT_CONNECTED:                DiscoverSetErrStr(d, errNo, "not connected"); break;
+    case SI_TORO__SINC__ERROR_CODE__MULTIPLE_THREAD_WAIT:         DiscoverSetErrStr(d, errNo, "multiple thread wait"); break;
     case _SI_TORO__SINC__ERROR_CODE_IS_INT_SIZE:                  DiscoverSetErrStr(d, errNo, "unknown error"); break;
     }
 }

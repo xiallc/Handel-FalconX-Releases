@@ -352,11 +352,18 @@ bool SincPacketPeekMulti(Sinc **channelSet, int numChannels, int timeout, SiToro
 
     // We need to read more data. Wait on data from any channel.
     int *fdSet = malloc(sizeof(int) * (size_t)numChannels);
-    bool *readOk = malloc(sizeof(bool) * (size_t)numChannels);
-
-    if (fdSet == NULL || readOk == NULL)
+    if (fdSet == NULL)
     {
         *packetChannel = 0;
+        SincReadErrorSetCode(channelSet[*packetChannel], SI_TORO__SINC__ERROR_CODE__OUT_OF_MEMORY);
+        return false;
+    }
+
+    bool *readOk = malloc(sizeof(bool) * (size_t)numChannels);
+    if (readOk == NULL)
+    {
+        *packetChannel = 0;
+        free(fdSet);
         SincReadErrorSetCode(channelSet[*packetChannel], SI_TORO__SINC__ERROR_CODE__OUT_OF_MEMORY);
         return false;
     }
@@ -366,8 +373,32 @@ bool SincPacketPeekMulti(Sinc **channelSet, int numChannels, int timeout, SiToro
 
     while (true)
     {
+        // Check for multiple threads waiting.
+        for (i = 0; i < numChannels; i++)
+        {
+            if (channelSet[i]->inSocketWait)
+            {
+                *packetChannel = 0;
+                SincReadErrorSetCode(channelSet[i], SI_TORO__SINC__ERROR_CODE__MULTIPLE_THREAD_WAIT);
+                free(fdSet);
+                free(readOk);
+                return false;
+            }
+        }
+
+        for (i = 0; i < numChannels; i++)
+        {
+            channelSet[i]->inSocketWait = true;
+        }
+
         // Wait for network activity.
         int err = SincSocketWaitMulti(fdSet, numChannels, timeout, readOk);
+
+        for (i = 0; i < numChannels; i++)
+        {
+            channelSet[i]->inSocketWait = false;
+        }
+
         if (err != 0)
         {
             *packetChannel = 0;
@@ -568,6 +599,41 @@ bool SincReadCheckParamConsistencyResponse(Sinc *sc, int timeout, SiToro__Sinc__
     }
 
     success = SincDecodeCheckParamConsistencyResponse(&sc->readErr, &packet, resp, fromChannelId);
+    if (!success)
+        sc->err = &sc->readErr;
+
+    SINC_BUFFER_CLEAR(&packet);
+    return success;
+}
+
+
+/*
+ * NAME:        SincReadDownloadCrashDumpResponse
+ * ACTION:      Reads a response to a download crash dump command. May or may not wait depending on
+ *              the timeout.
+ * PARAMETERS:  Sinc *sc           - the channel to listen to.
+ *              int timeout        - in milliseconds. 0 to poll. -1 to wait forever.
+ *              bool *newDump      - set true if this crash dump is new.
+ *              uint8_t **dumpData - where to put a pointer to the newly allocated crash dump data.
+ *                                   This should be free()d after use.
+ *              size_t *dumpSize   - where to put the size of the crash dump data.
+ * RETURNS:     true on success, false otherwise. On failure use SincErrno() and
+ *                  SincStrError() to get the error status.
+ */
+
+bool SincReadDownloadCrashDumpResponse(Sinc *sc, int timeout, bool *newDump, uint8_t **dumpData, size_t *dumpSize)
+{
+    uint8_t pad[256];
+    SincBuffer packet = SINC_BUFFER_INIT(pad);
+    int success;
+
+    if (!SincWaitForMessageType(sc, timeout, &packet, SI_TORO__SINC__MESSAGE_TYPE__DOWNLOAD_CRASH_DUMP_RESPONSE))
+    {
+        SINC_BUFFER_CLEAR(&packet);
+        return false;
+    }
+
+    success = SincDecodeDownloadCrashDumpResponse(&sc->readErr, &packet, newDump, dumpData, dumpSize);
     if (!success)
         sc->err = &sc->readErr;
 

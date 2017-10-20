@@ -292,6 +292,10 @@ struct _FalconXNDetector {
      */
     ChannelState channelState;
 
+    struct FirmwareFeatures {
+        boolean_t mcaGateVeto;
+    } features;
+
     /* Characterization data returned when valid. */
     double calibPercentage;
     char calibStage[256];

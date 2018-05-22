@@ -1157,7 +1157,7 @@ HANDEL_EXPORT int HANDEL_API xiaRemoveFirmware(const char *alias)
     current = xiaFirmwareSetHead;
     next = current->next;
 
-    while (!STREQ(strtemp, current->alias))
+    while (!STREQ(strtemp, current->alias) && (next != NULL))
     {
         prev = current;
         current = next;
@@ -1165,8 +1165,7 @@ HANDEL_EXPORT int HANDEL_API xiaRemoveFirmware(const char *alias)
     }
 
     /* Check if we found nothing */
-    if ((next == NULL) &&
-        (current == NULL))
+    if ((next == NULL) && (current == NULL))
     {
         status = XIA_NO_ALIAS;
         xiaLog(XIA_LOG_ERROR, status, "xiaRemoveFirmware",

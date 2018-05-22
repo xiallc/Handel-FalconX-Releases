@@ -18,6 +18,8 @@
 
 #define SINC_UDP_HISTOGRAM_HEADER_SIZE_PROTOCOL_0 110
 
+#define MIN(a,b) (((a)<(b))?(a):(b))
+
 
 /*
  * NAME:        SincDecodeSuccessResponse
@@ -334,6 +336,39 @@ bool SincDecodeListParamDetailsResponse(SincError *err, SincBuffer *packet, SiTo
 
     if (resp == NULL)
         si_toro__sinc__list_param_details_response__free_unpacked(r, NULL);
+
+    return ok;
+}
+
+
+/*
+ * NAME:        SincDecodeSynchronizeLogResponse
+ * ACTION:      Decodes a synchronize log response from the device.
+ * PARAMETERS:  Sinc *sc                                    - the channel to listen to.
+ *              SincBuffer *packet                          - the de-encapsulated packet to decode.
+ *              SiToro__Sinc__SynchronizeLogResponse **resp - where to put the response received. NULL to not use.
+ *                  This message should be freed with si_toro__sinc__synchronize_log_response__free_unpacked(resp, NULL) after use.
+ * RETURNS:     true on success, false otherwise. On failure use SincErrno() and
+ *                  SincStrError() to get the error status.
+ */
+
+bool SincDecodeSynchronizeLogResponse(SincError *err, SincBuffer *packet, SiToro__Sinc__SynchronizeLogResponse **resp)
+{
+    int ok;
+    SiToro__Sinc__SynchronizeLogResponse *r = si_toro__sinc__synchronize_log_response__unpack(NULL, packet->cbuf.len, packet->cbuf.data);
+    if (resp != NULL)
+        *resp = r;
+
+    if (r == NULL)
+    {
+        SincErrorSetMessage(err, SI_TORO__SINC__ERROR_CODE__READ_FAILED, "corrupted synchronize log packet");
+        return false;
+    }
+
+    ok = SincInterpretSuccessError(err, r->success);
+
+    if (resp == NULL)
+        si_toro__sinc__synchronize_log_response__free_unpacked(r, NULL);
 
     return ok;
 }
@@ -702,6 +737,125 @@ errorExitDecodeOsc:
 
 
 /*
+ * NAME:        SincDecodeOscilloscopeDataResponseAsPlotArray
+ * ACTION:      Decodes a capture from the oscilloscope as an array of plots with different data in each plot.
+ * PARAMETERS:  Sinc *sc               - the sinc connection.
+ *              SincBuffer *packet     - the de-encapsulated packet to decode.
+ *              int *fromChannelId     - if non-NULL this is set to the channel the histogram was received from.
+ *              SincOscPlot *plotArray - points to an array of oscilloscope plots. Plot 0 is the raw data. Plot 1 is reset blanked.
+ *                                       Will allocate plotArray[i]->intData so you must free it.
+ *              int maxPlotArray       - the number of SincOscPlots in the array.
+ *              int *plotArraySize     - will be set to the number of oscilloscope plots received.
+ * RETURNS:     true on success, false otherwise. On failure use SincErrno() and
+ *                  SincStrError() to get the error status. There's no need to free
+ *                  resetBlanked or rawCurve data on failure.
+ */
+
+bool SincDecodeOscilloscopeDataResponseAsPlotArray(SincError *err, SincBuffer *packet, int *fromChannelId, uint64_t *dataSetId, SincOscPlot *plotArray, int maxPlotArray, int *plotArraySize)
+{
+    uint16_t val_u16;
+    uint32_t val_u32;
+    size_t   i;
+    size_t   numIntPlots = 0;
+
+    // Clear the plots.
+    memset(plotArray, 0, sizeof(SincOscPlot) * maxPlotArray);
+
+    if (packet->cbuf.len < 2)
+    {
+        SincErrorSetMessage(err, SI_TORO__SINC__ERROR_CODE__READ_FAILED, "corrupted oscilloscope packet");
+        goto errorExitDecodeOsc;
+    }
+
+    uint32_t protobufHeaderLen = SINC_PROTOCOL_READ_UINT16(packet->cbuf.data);
+    unsigned int startPos = 2;
+    if (protobufHeaderLen == 0xffff)
+    {
+        // Extended length protobuf data.
+        protobufHeaderLen = SINC_PROTOCOL_READ_UINT32(&packet->cbuf.data[startPos]);
+        startPos += sizeof(uint32_t);
+    }
+
+    if (protobufHeaderLen + startPos > packet->cbuf.len)
+    {
+        SincErrorSetMessage(err, SI_TORO__SINC__ERROR_CODE__READ_FAILED, "corrupted oscilloscope packet");
+        goto errorExitDecodeOsc;
+    }
+
+    // Unpack it.
+    SiToro__Sinc__OscilloscopeDataResponse *resp = si_toro__sinc__oscilloscope_data_response__unpack(NULL, protobufHeaderLen, &packet->cbuf.data[startPos]);
+    if (resp == NULL)
+    {
+        SincErrorSetMessage(err, SI_TORO__SINC__ERROR_CODE__READ_FAILED, "corrupted oscilloscope packet");
+        goto errorExitDecodeOsc;
+    }
+
+    // Get some fields.
+    if (fromChannelId != NULL)
+    {
+        *fromChannelId = -1;
+        if (resp->has_channelid)
+            *fromChannelId = resp->channelid;
+    }
+
+    if (dataSetId != NULL)
+    {
+        *dataSetId = 0;
+        if (resp->has_datasetid)
+            *dataSetId = resp->datasetid;
+    }
+
+    // Get the int plots.
+    numIntPlots = MIN(resp->n_plots, (size_t)maxPlotArray);
+    for (i = 0; i < numIntPlots; i++)
+    {
+        if (resp->plots[i]->n_val > 0)
+        {
+            // Get the int plot.
+            plotArray[i].len = (int)resp->plots[i]->n_val;
+            plotArray[i].intData = malloc((size_t)plotArray[i].len * sizeof(int32_t));
+            if (plotArray[i].intData == NULL)
+            {
+                SincErrorSetCode(err, SI_TORO__SINC__ERROR_CODE__OUT_OF_MEMORY);
+                goto errorExitDecodeOsc;
+            }
+
+            memcpy(plotArray[i].intData, resp->plots[i]->val, (size_t)plotArray[i].len * sizeof(*plotArray[i].intData));
+
+            // Get the int value ranges.
+            if (resp->has_minvaluerange)
+                plotArray[i].minRange = resp->minvaluerange;
+
+            if (resp->has_maxvaluerange)
+                plotArray[i].maxRange = resp->maxvaluerange;
+        }
+    }
+
+    if (plotArraySize)
+    {
+        *plotArraySize = numIntPlots;
+    }
+
+    return true;
+
+    /* Using a linux kernel-style cleanup method to make sure resources are freed on any failure. */
+errorExitDecodeOsc:
+    for (i = 0; i < numIntPlots; i++)
+    {
+        if (plotArray[i].intData)
+        {
+            free(plotArray[i].intData);
+            plotArray[i].intData = NULL;
+        }
+
+        plotArray[i].len = 0;
+    }
+
+    return false;
+}
+
+
+/*
  * NAME:        SincDecodeHistogramDataResponse
  * ACTION:      Decodes an update from the histogram. Waits for the next histogram update to
  *              arrive if timeout is non-zero.
@@ -932,7 +1086,8 @@ errorExit:
 bool SincDecodeHistogramDatagramResponse(SincError *err, SincBuffer *packet, int *fromChannelId, SincHistogram *accepted, SincHistogram *rejected, SincHistogramCountStats *stats)
 {
     uint8_t *bufPos;
-    uint32_t headerLen, samples, spectrumSelectionMask;
+    size_t headerLen;
+    uint32_t samples, spectrumSelectionMask;
     uint16_t msgType, protocolVersion;
     int bufLeft;
     uint16_t val_u16;
@@ -1016,7 +1171,7 @@ bool SincDecodeHistogramDatagramResponse(SincError *err, SincBuffer *packet, int
         sPos += sizeof(uint32_t);
 
         stats->trigger = SI_TORO__SINC__HISTOGRAM_TRIGGER__REFRESH_UPDATE;
-        if (headerLen > sPos - packet->cbuf.data)
+        if (headerLen > (size_t)(sPos - packet->cbuf.data))
         {
             // Get the trigger.
             stats->trigger = SINC_PROTOCOL_READ_UINT32(sPos);

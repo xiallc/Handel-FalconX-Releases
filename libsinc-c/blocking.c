@@ -437,6 +437,12 @@ bool SincWaitReady(Sinc *sc, int channelId, int timeout)
         }
     }
 
+    // If we haven't get received a GetParamResponse wait for it or it'll throw everything else out of sync.
+    if (!gotGetParamResponse)
+    {
+        SincReadGetParamResponse(sc, timeout, NULL, NULL);
+    }
+
     // Clean up the buffer.
     SINC_BUFFER_CLEAR(&buf);
 

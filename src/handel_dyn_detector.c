@@ -668,7 +668,7 @@ HANDEL_EXPORT int HANDEL_API xiaGetDetectors(char *detectors[])
     Detector *current = xiaDetectorHead;
 
 
-    for (i = 0; current != NULL; current = getListNext(current)) {
+    for (i = 0; current != NULL; current = getListNext(current), i++) {
 
         strcpy((char*) detectors[i], current->alias);
     }
@@ -742,7 +742,7 @@ HANDEL_SHARED int HANDEL_API xiaSetupDetectors(void)
                 break;
 
             case 999:
-                xiaLog(XIA_LOG_ERROR, XIA_INVALID_DETCHAN, "xiaUserSetup",
+                xiaLog(XIA_LOG_ERROR, XIA_INVALID_DETCHAN, "xiaSetupDetectors",
                        "detChan %d is not valid.", current->detChan);
                 return XIA_INVALID_DETCHAN;
 
@@ -797,7 +797,7 @@ HANDEL_SHARED int HANDEL_API xiaEndDetectors(void)
                     break;
 
                 case 999:
-                    xiaLog(XIA_LOG_ERROR, XIA_INVALID_DETCHAN, "xiaUserSetup",
+                    xiaLog(XIA_LOG_ERROR, XIA_INVALID_DETCHAN, "xiaEndDetectors",
                            "detChan %d is not valid.", current->detChan);
                     return XIA_INVALID_DETCHAN;
 

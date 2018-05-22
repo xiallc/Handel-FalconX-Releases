@@ -1,4 +1,6 @@
 /*
+ * FalconXn Platform Specific Layer
+ *
  * Copyright (c) 2016 XIA LLC
  * All rights reserved
  *
@@ -33,10 +35,6 @@
  * SUCH DAMAGE.
  */
 
-/*
- * FalconXn Platform Specific Layer
- */
-
 #include <errno.h>
 #include <stdarg.h>
 #include <stdbool.h>
@@ -61,6 +59,7 @@
 
 #include "handel_file.h"
 #include "xia_file.h"
+#include "xia_sio.h"
 
 #include "md_threads.h"
 
@@ -68,19 +67,14 @@
 
 #include "falconxn_psl.h"
 
-#ifdef _MSC_VER
-#pragma warning(once: 4100)    /* unreferenced formal parameter */
-#pragma warning(once: 4127)    /* conditional expression is constant */
-
 /* Some msvc standard extensions pertaining to struct initializers do conform
  * with gcc features and are allowed by the msvc default flag /Ze but generate
  * warnings. We need them for initializing local SincBuffers (i.e.
  * SincBufferInit).
  */
-#pragma warning(disable: 4204) /* non-constant aggregate initializer */
-#pragma warning(disable: 4221) /* cannot be initialized using address of
-                                * automatic variable */
-#endif
+PRAGMA(msvc, warning(disable: 4204)) /* non-constant aggregate initializer */
+PRAGMA(msvc, warning(disable: 4221)) /* cannot be initialized using address of
+                                              * automatic variable */
 
 /*
  * Statistic data types for SiToro list mode data. This is to
@@ -128,6 +122,7 @@ typedef union {
 /* Required PSL hooks */
 PSL_STATIC int psl__IniWrite(FILE* fp, const char* section, const char* path,
                              void *value, const int index, Module *module);
+PSL_STATIC int psl__LoadChanData(const int modChan, Module *module);
 PSL_STATIC int psl__SetupModule(Module *module);
 PSL_STATIC int psl__EndModule(Module *module);
 PSL_STATIC int psl__SetupDetChan(int detChan, Detector *detector, Module *module);
@@ -173,13 +168,16 @@ PSL_STATIC int psl__ModuleTransactionEnd(Module* module);
 
 PSL_STATIC boolean_t psl__CanRemoveName(const char *name);
 
-PSL_STATIC int psl__DetCharacterizeStart(int detChan, Detector* detector, Module* module);
-PSL_STATIC int psl__UnloadDetCharacterization(Module* module, Detector* detector, const char *filename);
-PSL_STATIC int psl__LoadDetCharacterization(Detector *detector, Module *module);
+PSL_STATIC int psl__DetCharacterizeStart(int detChan, FalconXNDetector* fDetector, Module* module);
+PSL_STATIC int psl__UnloadDetCharacterization(Module* module, FalconXNDetector* fDetector,
+                                              xia_sio *buf);
+PSL_STATIC int psl__LoadDetCharacterization(FalconXNDetector *fDetector, Module *module);
+PSL_STATIC int psl__LoadDetCharacterizationF(FalconXNDetector *fDetector, Module *module, const char *filename);
+PSL_STATIC int psl__LoadDetCharacterizationS(FalconXNDetector *fDetector, Module *module, const char *calString);
 
-PSL_STATIC int psl__RefreshChannelState(Module* module, Detector* detector);
-PSL_STATIC int psl__UpdateChannelState(SiToro__Sinc__KeyValue* kv, Detector* detector);
-PSL_STATIC int psl__LoadChannelFeatures(Module* module, Detector* detector);
+PSL_STATIC int psl__RefreshChannelState(Module* module, FalconXNDetector* fDetector);
+PSL_STATIC int psl__UpdateChannelState(SiToro__Sinc__KeyValue* kv, FalconXNDetector* fDetector);
+PSL_STATIC int psl__LoadChannelFeatures(Module* module, int modChan);
 
 /* Board operations */
 PSL_STATIC int psl__BoardOp_Apply(int detChan, Detector* detector, Module* module,
@@ -198,34 +196,58 @@ PSL_STATIC int psl__BoardOp_GetSerialNumber(int detChan, Detector* detector, Mod
                                             const char *name, void *value);
 PSL_STATIC int psl__BoardOp_GetFirmwareVersion(int detChan, Detector* detector, Module* module,
                                                const char *name, void *value);
+PSL_STATIC int psl__BoardOp_GetBoardFeatures(int detChan, Detector* detector, Module* module,
+                                             const char *name, void *value);
 
 /* Helpers */
 PSL_STATIC PSL_INLINE int psl__SetAcqValue(acqValue*    acqVal,
                                            const double value);
 PSL_STATIC bool psl__AcqRemoved(const char *name);
-PSL_STATIC Detector* psl__FindDetector(Module* module, int channel);
+PSL_STATIC FalconXNDetector* psl__FindDetector(Module* module, int channel);
 PSL_STATIC int psl__GetParam(Module* module, int channel, const char* name,
                              SiToro__Sinc__GetParamResponse** resp);
-PSL_STATIC int psl__SetParam(Module* module, Detector* detector,
+PSL_STATIC int psl__SetParam(Module* module, int modChan,
                              SiToro__Sinc__KeyValue* param);
 PSL_STATIC int psl__GetParamValue(Module* module, int channel, const char* name,
                                   int paramType, psl__SincParamValue* val);
+PSL_STATIC int psl__GetParamS(Module* module, int channel, const char* name,
+                              char* value);
 PSL_STATIC int psl__GetParamDetails(Module* module, int channel, const char *prefix,
                                     SiToro__Sinc__ListParamDetailsResponse** resp);
 PSL_STATIC int psl__GetMaxNumberSca(int detChan, Module* module, int *value);
-PSL_STATIC int psl__SetDigitalConf(int detChan, Detector* detector, Module* module);
-PSL_STATIC int psl__SyncMCARefresh(Module *module, Detector *detector);
-PSL_STATIC int psl__SetMCARefresh(Module *module, Detector *detector, double period);
-PSL_STATIC int psl__SyncPresetType(Module *module, Detector *detector);
-PSL_STATIC int psl__SyncPixelAdvanceMode(Module *module, Detector *detector);
-PSL_STATIC int psl__SetHistogramMode(Module *module, Detector *detector,
+PSL_STATIC int psl__SetDigitalConf(int modChan, Module* module);
+PSL_STATIC int psl__SyncMCARefresh(Module *module, FalconXNDetector *fDetector);
+PSL_STATIC int psl__SetMCARefresh(Module *module, int modChan, double period);
+PSL_STATIC int psl__SyncPresetType(Module *module, FalconXNDetector *fDetector);
+PSL_STATIC int psl__SyncPixelAdvanceMode(Module *module, FalconXNDetector *fDetector);
+PSL_STATIC int psl__SetHistogramMode(Module *module, int modChan,
                                      const char *mode);
-PSL_STATIC int psl__SyncNumberMCAChannels(Module *module, Detector *detector,
+PSL_STATIC int psl__SyncNumberMCAChannels(Module *module, FalconXNDetector *fDetector,
                                           int64_t number_mca_channels,
                                           int64_t mca_start_channel);
-PSL_STATIC int psl__SyncGateCollectionMode(Module *module, Detector *detector);
-PSL_STATIC int psl__SyncGateVetoMode(Module *module, Detector *detector);
-PSL_STATIC int psl__ClearGateVetoMode(Module *module, Detector *detector);
+PSL_STATIC int psl__SyncGateCollectionMode(Module *module, FalconXNDetector *fDetector);
+PSL_STATIC int psl__SyncGateVetoMode(Module *module, FalconXNDetector *fDetector);
+PSL_STATIC int psl__ClearGateVetoMode(Module *module, FalconXNDetector *fDetector);
+PSL_STATIC boolean_t psl__GetCalibrated(Module* module, FalconXNDetector* fDetector);
+PSL_STATIC int psl__UpdateCalibration(Module* module, FalconXNDetector* fDetector);
+
+/*
+ * Override xia_system PSL validation to ignore detector->pslData since falconxn
+ * uses module->ch[modChan].pslData.
+ */
+#undef xiaPSLBadArgs
+#define xiaPSLBadArgs(_detChan, _m, _d) \
+    do { \
+        int __modChan = xiaGetModChan(_detChan);  \
+        if (!(_m) || \
+            !(_d) || \
+            !(_m)->pslData || \
+            __modChan >= (int) (_m)->number_of_channels || \
+            !(_m)->ch[__modChan].pslData) { \
+            pslLog(PSL_LOG_ERROR, XIA_BAD_PSL_ARGS, "Module, detector or PSL data is NULL"); \
+            return XIA_BAD_PSL_ARGS; \
+        } \
+    } ONCE
 
 /* Acquisition value handler */
 #define ACQ_HANDLER_DECL(_n)                                        \
@@ -296,7 +318,7 @@ ACQ_HANDLER_DECL(sync_count);
 
 
 /* The default acquisition values. */
-#define ACQ_DEFAULT(_n, _t, _d, _f, _s)                                 \
+#define ACQ_DEFAULT(_n, _t, _d, _f, _s)             \
     { # _n, (_d), (_t), (_f), ACQ_HANDLER(_n), _s}
 
 /* Compact the flags to make the table narrower. */
@@ -313,13 +335,13 @@ ACQ_HANDLER_DECL(sync_count);
  */
 static const AcquisitionValue DEFAULT_ACQ_VALUES[] = {
     /* analog settings */
-    ACQ_DEFAULT(analog_gain,                 acqFloat,   1.0, PSL_ACQ_HD, NULL),
+    ACQ_DEFAULT(analog_gain,                 acqFloat,   3.0, PSL_ACQ_HD, NULL),
     ACQ_DEFAULT(analog_offset,               acqFloat,   0.0, PSL_ACQ_HD, NULL),
     ACQ_DEFAULT(detector_polarity,           acqBool,    0.0, PSL_ACQ_HD, ACQ_SYNC(detector_polarity)),
     ACQ_DEFAULT(termination,                 acqInt,     0.0, PSL_ACQ_HD, NULL),
     ACQ_DEFAULT(attenuation,                 acqInt,     0.0, PSL_ACQ_HD, NULL),
     ACQ_DEFAULT(coupling,                    acqInt,     0.0, PSL_ACQ_HD, NULL),
-    ACQ_DEFAULT(decay_time,                  acqInt,     0.0, PSL_ACQ_HD, NULL),
+    ACQ_DEFAULT(decay_time,                  acqInt,     XIA_DECAY_SHORT, PSL_ACQ_HD, NULL),
     ACQ_DEFAULT(dc_offset,                   acqFloat,   0.0, PSL_ACQ_HD, NULL),
     ACQ_DEFAULT(reset_blanking_enable,       acqBool,    1.0, PSL_ACQ_HD, NULL),
     ACQ_DEFAULT(reset_blanking_threshold,    acqFloat, -0.05, PSL_ACQ_HD, NULL),
@@ -346,11 +368,11 @@ static const AcquisitionValue DEFAULT_ACQ_VALUES[] = {
     ACQ_DEFAULT(sca_pulse_duration,          acqInt,   400.0, PSL_ACQ_HD, NULL),
     ACQ_DEFAULT(number_of_scas,              acqInt,     0.0, PSL_ACQ_HD, NULL),
     ACQ_DEFAULT(sca,                         acqFloat,   0.0, PSL_ACQ_E,  NULL),
-    ACQ_DEFAULT(num_map_pixels_per_buffer,   acqInt,    1024, PSL_ACQ_HD, NULL),
     ACQ_DEFAULT(num_map_pixels,              acqInt,       0, PSL_ACQ_HD, NULL),
+    ACQ_DEFAULT(num_map_pixels_per_buffer,   acqInt,    1024, PSL_ACQ_HD, NULL),
     ACQ_DEFAULT(pixel_advance_mode,          acqInt,       0, PSL_ACQ_HD, NULL),
     ACQ_DEFAULT(input_logic_polarity,        acqInt,       0, PSL_ACQ_HD, NULL),
-    ACQ_DEFAULT(gate_ignore,                 acqInt,       0, PSL_ACQ_HD, NULL),
+    ACQ_DEFAULT(gate_ignore,                 acqInt,     1.0, PSL_ACQ_HD, NULL),
     ACQ_DEFAULT(sync_count,                  acqInt,       0, PSL_ACQ_HD, NULL),
 };
 
@@ -372,6 +394,7 @@ static  BoardOperation boardOps[] =
         { "mapping_pixel_next",   psl__BoardOp_MappingPixelNext },
 
         { "get_board_info",       psl__BoardOp_GetBoardInfo },
+        { "get_board_features",   psl__BoardOp_GetBoardFeatures},
 
         /* FalconXn Specific board operations. */
         { "get_connected",        psl__BoardOp_GetConnected },
@@ -411,6 +434,17 @@ PSL_SHARED int falconxn_PSLInit(const PSLHandlers** psl)
     return XIA_SUCCESS;
 }
 
+/*
+ * Set the SINC protocol keyvalue. Localize here to supress any warnings.
+ */
+PSL_STATIC void falconXNSetSincKeyValue(SiToro__Sinc__KeyValue* kv, const char* value)
+{
+    PRAGMA_PUSH
+    PRAGMA_IGNORE_CAST_QUALIFIER
+    kv->optionval = (char*) value;
+    PRAGMA_POP
+}
+
 PSL_STATIC void falconXNClearCalibrationData(SincCalibrationPlot* plot)
 {
     if (plot->x != NULL) {
@@ -429,6 +463,7 @@ PSL_STATIC void falconXNClearCalibrationData(SincCalibrationPlot* plot)
  */
 PSL_STATIC void falconXNClearDetectorCalibrationData(FalconXNDetector* fDetector)
 {
+    fDetector->calibrationState = CalibrationNeedRefresh;
     if (fDetector->calibData.data != NULL) {
         free(fDetector->calibData.data);
         fDetector->calibData.data = NULL;
@@ -452,37 +487,29 @@ PSL_STATIC void falconXNClearDetectorStats(FalconXNDetector* fDetector)
 /*
  * Convert SINC stats to Handel stats.
  */
-PSL_STATIC void falconXNSetDetectorStats(FalconXNDetector* fDetector,
+PSL_STATIC void falconXNSetDetectorStats(double*                  detectorStats,
                                          SincHistogramCountStats* stats)
 {
-    fDetector->stats[FALCONXN_STATS_TIME_ELAPSED] =
-        stats->timeElapsed;
-    fDetector->stats[FALCONXN_STATS_TRIGGERS] =
+    detectorStats[FALCONXN_STATS_TIME_ELAPSED] = stats->timeElapsed;
+    detectorStats[FALCONXN_STATS_TRIGGERS] =
         (double) (stats->pulsesAccepted + stats->pulsesRejected);
 
     /* inputCountRate=NaN has been observed when there is no signal. */
-    fDetector->stats[FALCONXN_STATS_TRIGGER_LIVETIME] =
+    detectorStats[FALCONXN_STATS_TRIGGER_LIVETIME] =
         isnormal(stats->inputCountRate)
-        ? fDetector->stats[FALCONXN_STATS_TRIGGERS] / stats->inputCountRate
+        ? detectorStats[FALCONXN_STATS_TRIGGERS] / stats->inputCountRate
         : 0.0;
 
-    fDetector->stats[FALCONXN_STATS_MCA_EVENTS] =
-        (double) stats->pulsesAccepted;
-    fDetector->stats[FALCONXN_STATS_INPUT_COUNT_RATE] =
+    detectorStats[FALCONXN_STATS_MCA_EVENTS] = (double) stats->pulsesAccepted;
+    detectorStats[FALCONXN_STATS_INPUT_COUNT_RATE] =
         isnormal(stats->inputCountRate) ? stats->inputCountRate : 0.0;
-    fDetector->stats[FALCONXN_STATS_OUTPUT_COUNT_RATE] =
-        stats->outputCountRate;
+    detectorStats[FALCONXN_STATS_OUTPUT_COUNT_RATE] = stats->outputCountRate;
 
-    fDetector->stats[FALCONXN_STATS_SAMPLES_DETECTED] =
-        (double) stats->samplesDetected;
-    fDetector->stats[FALCONXN_STATS_SAMPLES_ERASED] =
-        (double) stats->samplesErased;
-    fDetector->stats[FALCONXN_STATS_PULSES_ACCEPTED] =
-        (double) stats->pulsesAccepted;
-    fDetector->stats[FALCONXN_STATS_PULSES_REJECTED] =
-        (double) stats->pulsesRejected;
-    fDetector->stats[FALCONXN_STATS_DEADTIME] =
-        stats->deadTime;
+    detectorStats[FALCONXN_STATS_SAMPLES_DETECTED] = (double) stats->samplesDetected;
+    detectorStats[FALCONXN_STATS_SAMPLES_ERASED] = (double) stats->samplesErased;
+    detectorStats[FALCONXN_STATS_PULSES_ACCEPTED] = (double) stats->pulsesAccepted;
+    detectorStats[FALCONXN_STATS_PULSES_REJECTED] = (double) stats->pulsesRejected;
+    detectorStats[FALCONXN_STATS_DEADTIME] = stats->deadTime;
 }
 
 /*
@@ -710,90 +737,81 @@ PSL_STATIC int psl__ModuleUnlock(Module* module)
     return status;
 }
 
-PSL_STATIC int psl__DetectorChannel(Detector* detector)
+PSL_STATIC int psl__DetectorChannel(FalconXNDetector* fDetector)
 {
-    FalconXNDetector* fDetector = detector->pslData;
     return fDetector->modDetChan;
 }
 
-PSL_STATIC int psl__DetectorLock(Detector* detector)
+PSL_STATIC int psl__DetectorLock(FalconXNDetector* fDetector)
 {
     int status = XIA_SUCCESS;
-
-    FalconXNDetector* fDetector = detector->pslData;
 
     status = handel_md_mutex_lock(&fDetector->lock);
     if (status != 0) {
         status = XIA_THREAD_ERROR;
         pslLog(PSL_LOG_ERROR, status,
-               "Cannot lock detector: %s", detector->alias);
+               "Cannot lock detector: %d", fDetector->detChan);
     }
 
     return status;
 }
 
-PSL_STATIC int psl__DetectorUnlock(Detector* detector)
+PSL_STATIC int psl__DetectorUnlock(FalconXNDetector* fDetector)
 {
     int status = XIA_SUCCESS;
-
-    FalconXNDetector* fDetector = detector->pslData;
 
     status = handel_md_mutex_unlock(&fDetector->lock);
     if (status != 0) {
         status = XIA_THREAD_ERROR;
         pslLog(PSL_LOG_ERROR, status,
-               "Cannot unlock detector: %s", detector->alias);
+               "Cannot unlock detector: %d", fDetector->detChan);
     }
 
     return status;
 }
 
-PSL_STATIC int psl__DetectorWait(Detector* detector, unsigned int timeout)
+PSL_STATIC int psl__DetectorWait(FalconXNDetector* fDetector, unsigned int timeout)
 {
     int status = XIA_SUCCESS;
 
-    FalconXNDetector* fDetector = detector->pslData;
-
     pslLog(PSL_LOG_DEBUG,
            "Detector %d waiting, timeout=%u",
-           psl__DetectorChannel(detector), timeout);
+           fDetector->detChan, timeout);
 
     status = handel_md_event_wait(&fDetector->asyncEvent, timeout);
     if (status != 0) {
         if (status == THREADING_TIMEOUT) {
             pslLog(PSL_LOG_DEBUG, "Detector %d timeout",
-                   psl__DetectorChannel(detector));
+                   fDetector->detChan);
             status = XIA_TIMEOUT;
         }
         else {
             int ee = status;
             status = XIA_THREAD_ERROR;
             pslLog(PSL_LOG_ERROR, status,
-                   "Detector wait failed: %s: %d", detector->alias, ee);
+                   "Detector %d wait failed: %d", fDetector->detChan, ee);
         }
     }
 
     pslLog(PSL_LOG_DEBUG,
-           "Detector %d woken: %d", psl__DetectorChannel(detector), status);
+           "Detector %d woken: %d", fDetector->detChan, status);
 
     return status;
 }
 
-PSL_STATIC int psl__DetectorSignal(Detector* detector)
+PSL_STATIC int psl__DetectorSignal(FalconXNDetector* fDetector)
 {
     int status = XIA_SUCCESS;
 
-    FalconXNDetector* fDetector = detector->pslData;
-
     pslLog(PSL_LOG_DEBUG,
-           "Detector %d signalled", psl__DetectorChannel(detector));
+           "Detector %d signalled", fDetector->detChan);
 
     status = handel_md_event_signal(&fDetector->asyncEvent);
     if (status != 0) {
         int ee = status;
         status = XIA_THREAD_ERROR;
         pslLog(PSL_LOG_ERROR, status,
-               "Detector signal failed: %s: %d", detector->alias, ee);
+               "Detector signal failed: %d: %d", fDetector->detChan, ee);
     }
 
     return status;
@@ -869,6 +887,10 @@ PSL_STATIC int psl__CheckSuccessResponse(Module* module)
     response.channel = -1;
     response.type = SI_TORO__SINC__MESSAGE_TYPE__SUCCESS_RESPONSE;
 
+    /*
+     * On error do not unlock the sendLock, the caller needs to call
+     * psl__ModuleTransactionEnd().
+     */
     status = psl__ModuleTransactionReceive(module, &response);
     if (status != XIA_SUCCESS) {
         return status;
@@ -893,14 +915,12 @@ PSL_STATIC int psl__CheckSuccessResponse(Module* module)
     return status;
 }
 
-PSL_STATIC int psl__MonitorChannel(Module* module, Detector* detector)
+PSL_STATIC int psl__MonitorChannel(Module* module)
 {
     int status;
 
     uint8_t    pad[256];
     SincBuffer packet = SINC_BUFFER_INIT(pad);
-
-    UNUSED(detector);
 
     FalconXNModule* fModule = module->pslData;
 
@@ -931,14 +951,14 @@ PSL_STATIC int psl__MonitorChannel(Module* module, Detector* detector)
 }
 
 /* Gets the channel.state from Sinc and updates the detector channel state. */
-PSL_STATIC int psl__RefreshChannelState(Module* module, Detector* detector)
+PSL_STATIC int psl__RefreshChannelState(Module* module, FalconXNDetector* fDetector)
 {
     int status;
 
     SiToro__Sinc__GetParamResponse* resp = NULL;
     SiToro__Sinc__KeyValue*         kv;
 
-    status = psl__GetParam(module, psl__DetectorChannel(detector),
+    status = psl__GetParam(module, fDetector->modDetChan,
                            "channel.state", &resp);
     if (status != XIA_SUCCESS) {
         pslLog(PSL_LOG_ERROR, status,
@@ -951,19 +971,19 @@ PSL_STATIC int psl__RefreshChannelState(Module* module, Detector* detector)
     if (kv->has_paramtype && kv->optionval)
         pslLog(PSL_LOG_DEBUG, "Refresh channel state: %s", kv->optionval);
 
-    status = psl__DetectorLock(detector);
+    status = psl__DetectorLock(fDetector);
     if (status != XIA_SUCCESS) {
         pslLog(PSL_LOG_ERROR, status, "Unable to get the detector lock");
         return status;
     }
 
-    status = psl__UpdateChannelState(kv, detector);
+    status = psl__UpdateChannelState(kv, fDetector);
 
     if (status != XIA_SUCCESS) {
         pslLog(PSL_LOG_ERROR, status, "Updating channel state");
     }
 
-    psl__DetectorUnlock(detector);
+    psl__DetectorUnlock(fDetector);
 
     si_toro__sinc__get_param_response__free_unpacked(resp, NULL);
 
@@ -974,16 +994,16 @@ PSL_STATIC int psl__RefreshChannelState(Module* module, Detector* detector)
  * Queries the board for features we support conditionally based on firmware.
  * Updates the detector features state.
  */
-PSL_STATIC int psl__LoadChannelFeatures(Module* module, Detector* detector)
+PSL_STATIC int psl__LoadChannelFeatures(Module* module, int modChan)
 {
     int status;
     SiToro__Sinc__ListParamDetailsResponse* resp = NULL;
 
-    FalconXNDetector* fDetector = detector->pslData;
+    FalconXNDetector* fDetector = psl__FindDetector(module, modChan);
 
-    int i;
+    size_t i, j;
 
-    status = psl__DetectorLock(detector);
+    status = psl__DetectorLock(fDetector);
     if (status != XIA_SUCCESS) {
         pslLog(PSL_LOG_ERROR, status, "Unable to get the detector lock");
         return status;
@@ -991,21 +1011,19 @@ PSL_STATIC int psl__LoadChannelFeatures(Module* module, Detector* detector)
 
     /* Clear feature flags. */
     fDetector->features.mcaGateVeto = FALSE_;
+    fDetector->features.termination50ohm = FALSE_;
+    fDetector->features.attenuationGround = FALSE_;
 
-    psl__DetectorUnlock(detector);
+    psl__DetectorUnlock(fDetector);
 
-    /*
-     * Query parameters we need to check. Full param names, e.g.
-     * gate.veto, don't work. It has to be a prefix.
-     */
-    status = psl__GetParamDetails(module, fDetector->modDetChan, "gate", &resp);
+    /* Get a list of parameter details */
+    status = psl__GetParamDetails(module, modChan, "", &resp);
     if (status != XIA_SUCCESS) {
-        pslLog(PSL_LOG_ERROR, status,
-               "Unable to get param details");
+        pslLog(PSL_LOG_ERROR, status, "Unable to get param details");
         return status;
     }
 
-    status = psl__DetectorLock(detector);
+    status = psl__DetectorLock(fDetector);
     if (status != XIA_SUCCESS) {
         pslLog(PSL_LOG_ERROR, status, "Unable to get the detector lock");
         si_toro__sinc__list_param_details_response__free_unpacked(resp, NULL);
@@ -1018,14 +1036,33 @@ PSL_STATIC int psl__LoadChannelFeatures(Module* module, Detector* detector)
         if (strcmp("gate.veto", paramdetails->kv->key) == 0) {
             fDetector->features.mcaGateVeto = TRUE_;
         }
+
+        if (strcmp("afe.termination", paramdetails->kv->key) == 0) {
+            pslLog(PSL_LOG_INFO, "%s", paramdetails->kv->key);
+            for (j = 0; j < paramdetails->n_valuelist; j++) {
+                pslLog(PSL_LOG_INFO, "  %s", paramdetails->valuelist[j]);
+                if (strcmp("50ohm", paramdetails->valuelist[j]) == 0)
+                    fDetector->features.termination50ohm = TRUE_;
+            }
+        }
+
+        if (strcmp("afe.attn", paramdetails->kv->key) == 0) {
+            pslLog(PSL_LOG_INFO, "%s", paramdetails->kv->key);
+            for (j = 0; j < paramdetails->n_valuelist; j++) {
+                pslLog(PSL_LOG_INFO, "  %s", paramdetails->valuelist[j]);
+                if (strcmp("ground", paramdetails->valuelist[j]) == 0)
+                    fDetector->features.attenuationGround = TRUE_;
+            }
+        }
     }
 
-    psl__DetectorUnlock(detector);
+    psl__DetectorUnlock(fDetector);
 
     si_toro__sinc__list_param_details_response__free_unpacked(resp, NULL);
 
     return XIA_SUCCESS;
 }
+
 
 /*
  * Sends a command to stop any form of data acquisition on the
@@ -1091,7 +1128,7 @@ PSL_STATIC int psl__GetParam(Module*                          module,
 
     *resp = NULL;
 
-    SincEncodeGetParam(&packet, channel, (char*) name);
+    SincEncodeGetParam(&packet, channel, name);
 
     status = psl__ModuleTransactionSend(module, &packet);
     if (status != XIA_SUCCESS) {
@@ -1123,7 +1160,7 @@ PSL_STATIC int psl__GetParam(Module*                          module,
 }
 
 PSL_STATIC int psl__SetParam(Module*                 module,
-                             Detector*               detector,
+                             int                     modChan,
                              SiToro__Sinc__KeyValue* param)
 {
     int status;
@@ -1137,7 +1174,7 @@ PSL_STATIC int psl__SetParam(Module*                 module,
                   param);
     pslLog(PSL_LOG_DEBUG, "Param write: %s = %s", param->key, logValue);
 
-    SincEncodeSetParam(&packet, psl__DetectorChannel(detector), param);
+    SincEncodeSetParam(&packet, modChan, param);
 
     status = psl__ModuleTransactionSend(module, &packet);
     if (status != XIA_SUCCESS) {
@@ -1208,8 +1245,35 @@ PSL_STATIC int psl__GetParamValue(Module* module, int channel,
 }
 
 /*
+ * Helper to get a SINC param as a string.
+ * The caller must allocate XIA_DEBUG_PARAM_LEN characters.
+ */
+PSL_STATIC int psl__GetParamS(Module*     module,
+                              int         channel,
+                              const char* name,
+                              char*       value)
+{
+    int status;
+    SiToro__Sinc__GetParamResponse* resp = NULL;
+    SiToro__Sinc__KeyValue*         kv;
+
+    status = psl__GetParam(module, channel, name, &resp);
+    if (status != XIA_SUCCESS) {
+        pslLog(PSL_LOG_ERROR, status,
+               "Unable to get the DAC gain");
+        return status;
+    }
+
+    kv = resp->results[0];
+    psl__SPrintKV(value, XIA_DEBUG_PARAM_LEN, kv);
+
+    si_toro__sinc__get_param_response__free_unpacked(resp, NULL);
+
+    return XIA_SUCCESS;
+}
+
+/*
  * Perform the specified gain operation to the hardware.
- *
  */
 PSL_STATIC int psl__GainOperation(int detChan, const char *name, void *value,
                                   Detector *det, int modChan, Module *m, XiaDefaults *defs)
@@ -1222,6 +1286,8 @@ PSL_STATIC int psl__GainOperation(int detChan, const char *name, void *value,
     ASSERT(defs  != NULL);
     ASSERT(det   != NULL);
     ASSERT(m     != NULL);
+
+    xiaPSLBadArgs(detChan, m, det);
 
     if (STREQ(name, "calibrate")) {
         status = psl__GainCalibrate(detChan, det, modChan, m, defs, scaleFactor);
@@ -1238,13 +1304,13 @@ PSL_STATIC int psl__GainOperation(int detChan, const char *name, void *value,
     return XIA_BAD_NAME;
 }
 
-PSL_STATIC int psl__GetADCTraceLength(Module* module, Detector* detector,
+PSL_STATIC int psl__GetADCTraceLength(Module* module, int modChan,
                                       int64_t* length)
 {
     int status;
     psl__SincParamValue sincVal;
 
-    status = psl__GetParamValue(module,  psl__DetectorChannel(detector),
+    status = psl__GetParamValue(module,  modChan,
                                 "oscilloscope.samples",
                                 SI_TORO__SINC__KEY_VALUE__PARAM_TYPE__INT_TYPE,
                                 &sincVal);
@@ -1259,7 +1325,7 @@ PSL_STATIC int psl__GetADCTraceLength(Module* module, Detector* detector,
     return XIA_SUCCESS;
 }
 
-PSL_STATIC int psl__SetADCTraceLength(Module* module, Detector* detector,
+PSL_STATIC int psl__SetADCTraceLength(Module* module, int modChan,
                                       int64_t length)
 {
     int status;
@@ -1277,7 +1343,7 @@ PSL_STATIC int psl__SetADCTraceLength(Module* module, Detector* detector,
     kv.has_intval = TRUE_;
     kv.intval = length;
 
-    status = psl__SetParam(module, detector, &kv);
+    status = psl__SetParam(module, modChan, &kv);
     if (status != XIA_SUCCESS) {
         pslLog(PSL_LOG_ERROR, status,
                "Unable to set the oscilloscope sample count");
@@ -1287,7 +1353,7 @@ PSL_STATIC int psl__SetADCTraceLength(Module* module, Detector* detector,
     return XIA_SUCCESS;
 }
 
-PSL_STATIC int psl__GetADCTrace(Module* module, Detector* detector, void* buffer)
+PSL_STATIC int psl__GetADCTrace(Module* module, FalconXNDetector* fDetector, void* buffer)
 {
     int status;
 
@@ -1298,26 +1364,24 @@ PSL_STATIC int psl__GetADCTrace(Module* module, Detector* detector, void* buffer
     unsigned int* out;
     int s;
 
-    FalconXNDetector* fDetector = detector->pslData;
-
     SiToro__Sinc__KeyValue kv;
 
     pslLog(PSL_LOG_INFO,
-           "ADC trace channel %d", fDetector->modDetChan);
+           "ADC trace channel %d", fDetector->detChan);
 
     si_toro__sinc__key_value__init(&kv);
     kv.key = (char*) "oscilloscope.runContinuously";
     kv.has_boolval = TRUE_;
     kv.boolval = FALSE_;
 
-    status = psl__SetParam(module, detector, &kv);
+    status = psl__SetParam(module, fDetector->modDetChan, &kv);
     if (status != XIA_SUCCESS) {
         pslLog(PSL_LOG_ERROR, status,
                "Unable to set the oscilloscope run mode");
         return status;
     }
 
-    SincEncodeStartOscilloscope(&packet, psl__DetectorChannel(detector));
+    SincEncodeStartOscilloscope(&packet, psl__DetectorChannel(fDetector));
 
     status = psl__ModuleTransactionSend(module, &packet);
     if (status != XIA_SUCCESS) {
@@ -1336,7 +1400,7 @@ PSL_STATIC int psl__GetADCTrace(Module* module, Detector* detector, void* buffer
         return status;
     }
 
-    status = psl__DetectorLock(detector);
+    status = psl__DetectorLock(fDetector);
     if (status != XIA_SUCCESS)
         return status;
 
@@ -1345,18 +1409,18 @@ PSL_STATIC int psl__GetADCTrace(Module* module, Detector* detector, void* buffer
      */
     fDetector->asyncReady = TRUE_;
 
-    status = psl__DetectorUnlock(detector);
+    status = psl__DetectorUnlock(fDetector);
     if (status != XIA_SUCCESS)
         return status;
 
-    status = psl__DetectorWait(detector, FALCONXN_ADC_TRACE_TIMEOUT * 1000);
+    status = psl__DetectorWait(fDetector, FALCONXN_ADC_TRACE_TIMEOUT * 1000);
     if (status != XIA_SUCCESS) {
         pslLog(PSL_LOG_ERROR, status,
                "Oscilloscope data error or timeout");
         return status;
     }
 
-    status = psl__DetectorLock(detector);
+    status = psl__DetectorLock(fDetector);
     if (status != XIA_SUCCESS)
         return status;
 
@@ -1378,12 +1442,12 @@ PSL_STATIC int psl__GetADCTrace(Module* module, Detector* detector, void* buffer
 
     fDetector->adcTrace.len = 0;
 
-    status = psl__DetectorUnlock(detector);
+    status = psl__DetectorUnlock(fDetector);
 
     return status;
 }
 
-PSL_STATIC int psl__GetCalibration(Module* module, Detector* detector)
+PSL_STATIC int psl__UpdateCalibration(Module* module, FalconXNDetector* fDetector)
 {
     int status = XIA_SUCCESS;
 
@@ -1392,7 +1456,44 @@ PSL_STATIC int psl__GetCalibration(Module* module, Detector* detector)
 
     Sinc_Response response;
 
-    SincEncodeGetCalibration(&packet, psl__DetectorChannel(detector));
+    SiToro__Sinc__GetParamResponse* resp = NULL;
+    SiToro__Sinc__KeyValue*  kv;
+
+    pslLog(PSL_LOG_DEBUG, "Updating calibration result for %s channel %d",
+            module->alias, fDetector->modDetChan);
+
+    status = psl__DetectorLock(fDetector);
+    if (status != XIA_SUCCESS)
+        return status;
+
+    fDetector->calibrationState = CalibrationNone;
+
+    status = psl__GetParam(module, fDetector->modDetChan, "pulse.calibrated", &resp);
+
+    if (status != XIA_SUCCESS) {
+        pslLog(PSL_LOG_ERROR, status, "Unable to get pulse.calibrated");
+        return status;
+    }
+
+    kv = resp->results[0];
+
+    if (kv->has_paramtype &&
+        (kv->paramtype == SI_TORO__SINC__KEY_VALUE__PARAM_TYPE__BOOL_TYPE)) {
+        fDetector->calibrationState = kv->boolval ? CalibrationReady :
+                                        CalibrationNone;
+    }
+
+    si_toro__sinc__get_param_response__free_unpacked(resp, NULL);
+
+    pslLog(PSL_LOG_DEBUG, "Calibration success= %s", kv->boolval ? "yes" : "no");
+
+    psl__DetectorUnlock(fDetector);
+
+    if (fDetector->calibrationState == CalibrationNone)
+        return XIA_SUCCESS;
+
+    pslLog(PSL_LOG_DEBUG, "Get calibration data");
+    SincEncodeGetCalibration(&packet, psl__DetectorChannel(fDetector));
 
     status = psl__ModuleTransactionSend(module, &packet);
     if (status != XIA_SUCCESS) {
@@ -1404,14 +1505,13 @@ PSL_STATIC int psl__GetCalibration(Module* module, Detector* detector)
     /*
      * The 'resp'onse is NULL. The decoder loaded the data into the detector.
      */
-    response.channel = psl__DetectorChannel(detector);
+    response.channel = psl__DetectorChannel(fDetector);
     response.type = SI_TORO__SINC__MESSAGE_TYPE__GET_CALIBRATION_RESPONSE;
 
     status = psl__ModuleTransactionReceive(module, &response);
 
     if (status != XIA_SUCCESS) {
-        pslLog(PSL_LOG_ERROR, status,
-               "Receiving the response");
+        pslLog(PSL_LOG_ERROR, status, "Receiving the response");
     }
 
     psl__ModuleTransactionEnd(module);
@@ -1419,14 +1519,12 @@ PSL_STATIC int psl__GetCalibration(Module* module, Detector* detector)
     return status;
 }
 
-PSL_STATIC int psl__SetCalibration(Module* module, Detector* detector)
+PSL_STATIC int psl__SetCalibration(Module* module, FalconXNDetector* fDetector)
 {
     int status = XIA_SUCCESS;
 
     uint8_t    pad[256];
     SincBuffer packet = SINC_BUFFER_INIT(pad);
-
-    FalconXNDetector* fDetector = detector->pslData;
 
     SincEncodeSetCalibration(&packet,
                              fDetector->modDetChan,
@@ -1445,6 +1543,7 @@ PSL_STATIC int psl__SetCalibration(Module* module, Detector* detector)
     status = psl__CheckSuccessResponse(module);
 
     psl__ModuleTransactionEnd(module);
+    fDetector->calibrationState = CalibrationReady;
 
     return XIA_SUCCESS;
 }
@@ -1503,12 +1602,13 @@ PSL_STATIC int psl__SetAcquisitionValues(int        detChan,
     const AcquisitionValue* acq;
 
     ASSERT(detector);
-    ASSERT(detector->pslData);
     ASSERT(module);
     ASSERT(name);
     ASSERT(value);
 
-    fDetector = detector->pslData;
+    xiaPSLBadArgs(detChan, module, detector);
+
+    fDetector = psl__FindDetector(module, xiaGetModChan(detChan));
 
     pslLog(PSL_LOG_DEBUG,
            "%s (%d/%u): %s -> %0.3f.",
@@ -1582,29 +1682,27 @@ PSL_STATIC int psl__GetAcquisitionValues(int        detChan,
     ASSERT(name);
     ASSERT(value);
 
+    xiaPSLBadArgs(detChan, module, detector);
+
     defaults = xiaGetDefaultFromDetChan(detChan);
 
     if (defaults == NULL) {
-        xiaLog(XIA_LOG_ERROR, XIA_INCOMPLETE_DEFAULTS, "psl__GetAcquisitionValues",
+        pslLog(PSL_LOG_ERROR, XIA_INCOMPLETE_DEFAULTS,
                "Unable to get the defaults for detChan %d.", detChan);
         return XIA_INCOMPLETE_DEFAULTS;
     }
 
-    fDetector = detector->pslData;
-
-    if (!fDetector) {
-        status = XIA_INVALID_DETCHAN;
-        pslLog(PSL_LOG_ERROR, status,
-               "Unable to get the value of '%s' for detChan %d because the channel is not set up.",
-               name, detChan);
-        return status;
-    }
+    fDetector = psl__FindDetector(module, xiaGetModChan(detChan));
 
     acq = psl__GetAcquisition(name);
 
+    /* Get a SINC param as a string for debuggin. */
+    if (!acq && strchr(name, '.')) {
+        return psl__GetParamS(module, fDetector->modDetChan, name, value);
+    }
     if (!acq) {
         status = XIA_NOT_FOUND;
-        xiaLog(XIA_LOG_ERROR, status, "psl__GetAcquisitionValues",
+        pslLog(PSL_LOG_ERROR, status,
                "Unable to get the ACQ value '%s' for detChan %d.", name, detChan);
         return status;
     }
@@ -1669,7 +1767,7 @@ ACQ_HANDLER_DECL(analog_gain)
 
     UNUSED(defaults);
     UNUSED(fDetector);
-
+    UNUSED(detector);
 
     ACQ_HANDLER_LOG(gain);
 
@@ -1706,13 +1804,24 @@ ACQ_HANDLER_DECL(analog_gain)
         }
 
         *value = pow(16.0, (floatval - 409.6) / (8.0 * 409.6));
+
+        /* The setting of the dacGain value could introduce a round-off error,
+         * causing the actual value to fall below of the limits, set it back
+         * to the original limits to avoid error on restart
+         */
+        if (*value < ADC_GAIN_MIN && ((double)ADC_GAIN_MIN - *value) < 0.001) {
+            pslLog(PSL_LOG_DEBUG, "Resetting analog_gain value from %0.6f to %0.6f",
+                   *value, ADC_GAIN_MIN);
+            *value = ADC_GAIN_MIN;
+        }
     }
     else {
         SiToro__Sinc__KeyValue kv;
 
         if (*value < ADC_GAIN_MIN || ADC_GAIN_MAX < *value) {
             pslLog(PSL_LOG_ERROR, XIA_DAC_GAIN_OOR,
-                   "DAC gain value of %0.2f is outside acceptable range of [1,16]", *value);
+                   "DAC gain value of %0.6f is outside acceptable range of "
+                   "[%0f, %0f]", *value, ADC_GAIN_MIN, ADC_GAIN_MAX);
             return XIA_DAC_GAIN_OOR;
         }
 
@@ -1725,7 +1834,7 @@ ACQ_HANDLER_DECL(analog_gain)
          */
         kv.floatval = 409.6 + 8.0 * 409.6 * log10(*value) / log10(16.0);
 
-        status = psl__SetParam(module, detector, &kv);
+        status = psl__SetParam(module, channel, &kv);
         if (status != XIA_SUCCESS) {
             pslLog(PSL_LOG_ERROR, status,
                    "Unable to set the DAC gain");
@@ -1734,6 +1843,10 @@ ACQ_HANDLER_DECL(analog_gain)
 
         /* Apply the correct rounding to the value to be sent back to the user. */
         *value = pow(16.0, (kv.floatval - 409.6) / (8.0 * 409.6));
+
+        pslLog(PSL_LOG_DEBUG, "dacGain value %0.5f analog_gain value %0.5f",
+                   kv.floatval, *value);
+
     }
 
     return XIA_SUCCESS;
@@ -1748,6 +1861,7 @@ ACQ_HANDLER_DECL(analog_offset)
 
     UNUSED(defaults);
     UNUSED(fDetector);
+    UNUSED(detector);
 
     ACQ_HANDLER_LOG(analog_offset);
 
@@ -1799,7 +1913,7 @@ ACQ_HANDLER_DECL(analog_offset)
         kv.has_floatval = TRUE_;
         kv.floatval = *value - DAC_OFFSET_MIN;
 
-        status = psl__SetParam(module, detector, &kv);
+        status = psl__SetParam(module, channel, &kv);
         if (status != XIA_SUCCESS) {
             pslLog(PSL_LOG_ERROR, status,
                    "Unable to set the DAC offset");
@@ -1815,7 +1929,6 @@ ACQ_HANDLER_DECL(detector_polarity)
     int status;
 
     UNUSED(defaults);
-    UNUSED(fDetector);
 
 
     ACQ_HANDLER_LOG(detector_polarity);
@@ -1857,7 +1970,7 @@ ACQ_HANDLER_DECL(detector_polarity)
         /* inverted bool value between Handel and SINC semantics */
         kv.boolval = *value == 0.0 ? TRUE_ : FALSE_;
 
-        status = psl__SetParam(module, detector, &kv);
+        status = psl__SetParam(module, channel, &kv);
         if (status != XIA_SUCCESS) {
             pslLog(PSL_LOG_ERROR, status,
                    "Unable to set the detector polarity");
@@ -1867,7 +1980,13 @@ ACQ_HANDLER_DECL(detector_polarity)
         /* Sync the user's value to the detector struct, which is the
          * official record on startup (as effected by the sync routine).
          */
-        int detPhysChannel = xiaGetModDetectorChan(channel);
+        int detPhysChannel = xiaGetModDetectorChan(fDetector->detChan);
+        if (detPhysChannel == 999) {
+            pslLog(PSL_LOG_ERROR, XIA_BAD_CHANNEL,
+                "Can't find detector channel %s:%d", module->alias, channel);
+            return XIA_BAD_CHANNEL;
+        }
+
         detector->polarity[detPhysChannel] = (unsigned short) *value;
     }
 
@@ -1878,11 +1997,19 @@ ACQ_SYNC_DECL(detector_polarity)
 {
     int status;
 
+    int detPhysChannel;
     double polarity = 0.0;
 
     UNUSED(module);
 
-    polarity = detector->polarity[channel];
+    detPhysChannel = xiaGetModDetectorChan(detChan);
+    if (detPhysChannel == 999) {
+        pslLog(PSL_LOG_ERROR, XIA_BAD_CHANNEL,
+            "Can't find detector channel %s:%d", module->alias, channel);
+        return XIA_BAD_CHANNEL;
+    }
+
+    polarity = detector->polarity[detPhysChannel];
 
     ACQ_SYNC_LOG(detector_polarity, polarity);
 
@@ -1900,9 +2027,10 @@ ACQ_SYNC_DECL(detector_polarity)
 ACQ_HANDLER_DECL(termination)
 {
     int status;
+    bool supports50ohm = fDetector->features.termination50ohm;
 
     UNUSED(defaults);
-    UNUSED(fDetector);
+    UNUSED(detector);
 
 
     ACQ_HANDLER_LOG(termination);
@@ -1924,7 +2052,7 @@ ACQ_HANDLER_DECL(termination)
             (kv->paramtype == SI_TORO__SINC__KEY_VALUE__PARAM_TYPE__OPTION_TYPE)) {
             if (STREQ(kv->optionval, "1kohm"))
                 *value = 0;
-            else if (STREQ(kv->optionval, "50ohm"))
+            else if (STREQ(kv->optionval, "50ohm") && supports50ohm)
                 *value = 1;
             else {
                 status = XIA_BAD_VALUE;
@@ -1947,9 +2075,9 @@ ACQ_HANDLER_DECL(termination)
         si_toro__sinc__key_value__init(&kv);
         kv.key = (char*) "afe.termination";
         if (*value == 0.0)
-            kv.optionval = (char*) "1kohm";
-        else if (*value == 1.0)
-            kv.optionval = (char*) "50ohm";
+            falconXNSetSincKeyValue(&kv, "1kohm");
+        else if (*value == 1.0 && supports50ohm)
+            falconXNSetSincKeyValue(&kv, "50ohm");
         else {
             status = XIA_BAD_VALUE;
             pslLog(PSL_LOG_ERROR, status,
@@ -1957,7 +2085,7 @@ ACQ_HANDLER_DECL(termination)
             return status;
         }
 
-        status = psl__SetParam(module, detector, &kv);
+        status = psl__SetParam(module, channel, &kv);
         if (status != XIA_SUCCESS) {
             pslLog(PSL_LOG_ERROR, status,
                    "Unable to set the termination");
@@ -1968,13 +2096,14 @@ ACQ_HANDLER_DECL(termination)
     return XIA_SUCCESS;
 }
 
+
 ACQ_HANDLER_DECL(attenuation)
 {
     int status;
+    bool supportsGround = fDetector->features.attenuationGround;
 
     UNUSED(defaults);
-    UNUSED(fDetector);
-
+    UNUSED(detector);
 
     ACQ_HANDLER_LOG(attenuation);
 
@@ -1997,7 +2126,9 @@ ACQ_HANDLER_DECL(attenuation)
                 *value = 0;
             else if (STREQ(kv->optionval, "-6dB"))
                 *value = 1;
-            else if (STREQ(kv->optionval, "ground"))
+            else if (STREQ(kv->optionval, "ground") && supportsGround)
+                *value = 2;
+            else if (STREQ(kv->optionval, "-12dB") && !supportsGround)
                 *value = 2;
             else {
                 status = XIA_BAD_VALUE;
@@ -2020,11 +2151,13 @@ ACQ_HANDLER_DECL(attenuation)
         si_toro__sinc__key_value__init(&kv);
         kv.key = (char*) "afe.attn";
         if (*value == 0.0)
-            kv.optionval = (char*) "0dB";
+            falconXNSetSincKeyValue(&kv, "0dB");
         else if (*value == 1.0)
-            kv.optionval = (char*) "-6dB";
-        else if (*value == 2.0)
-            kv.optionval = (char*) "ground";
+            falconXNSetSincKeyValue(&kv, "-6dB");
+        else if (*value == 2.0 && supportsGround)
+            falconXNSetSincKeyValue(&kv, "ground");
+        else if (*value == 2.0 && !supportsGround)
+            falconXNSetSincKeyValue(&kv, "-12dB");
         else {
             status = XIA_BAD_VALUE;
             pslLog(PSL_LOG_ERROR, status,
@@ -2032,12 +2165,17 @@ ACQ_HANDLER_DECL(attenuation)
             return status;
         }
 
-        status = psl__SetParam(module, detector, &kv);
+        status = psl__SetParam(module, channel, &kv);
         if (status != XIA_SUCCESS) {
             pslLog(PSL_LOG_ERROR, status,
                    "Unable to set the attenuation");
             return status;
         }
+    }
+
+    if (!fDetector->features.attenuationGround && *value == 2.0) {
+        pslLog(PSL_LOG_WARNING, "Acquisition value 'attenuation' for the "
+            "current device maps 2.0 to -12dB instead of ground.");
     }
 
     return XIA_SUCCESS;
@@ -2049,6 +2187,7 @@ ACQ_HANDLER_DECL(coupling)
 
     UNUSED(defaults);
     UNUSED(fDetector);
+    UNUSED(detector);
 
 
     ACQ_HANDLER_LOG(coupling);
@@ -2093,9 +2232,9 @@ ACQ_HANDLER_DECL(coupling)
         si_toro__sinc__key_value__init(&kv);
         kv.key = (char*) "afe.coupling";
         if (*value == 0.0)
-            kv.optionval = (char*) "ac";
+            falconXNSetSincKeyValue(&kv, "ac");
         else if (*value == 1.0)
-            kv.optionval = (char*) "dc";
+            falconXNSetSincKeyValue(&kv, "dc");
         else {
             status = XIA_BAD_VALUE;
             pslLog(PSL_LOG_ERROR, status,
@@ -2103,7 +2242,7 @@ ACQ_HANDLER_DECL(coupling)
             return status;
         }
 
-        status = psl__SetParam(module, detector, &kv);
+        status = psl__SetParam(module, channel, &kv);
         if (status != XIA_SUCCESS) {
             pslLog(PSL_LOG_ERROR, status,
                    "Unable to set the coupling");
@@ -2120,6 +2259,7 @@ ACQ_HANDLER_DECL(decay_time)
 
     UNUSED(defaults);
     UNUSED(fDetector);
+    UNUSED(detector);
 
 
     ACQ_HANDLER_LOG(decay_time);
@@ -2168,13 +2308,13 @@ ACQ_HANDLER_DECL(decay_time)
         si_toro__sinc__key_value__init(&kv);
         kv.key = (char*) "afe.decayTime";
         if (*value == XIA_DECAY_LONG)
-            kv.optionval = (char*) "long";
+            falconXNSetSincKeyValue(&kv, "long");
         else if (*value == XIA_DECAY_MEDIUM)
-            kv.optionval = (char*) "medium";
+            falconXNSetSincKeyValue(&kv, "medium");
         else if (*value == XIA_DECAY_SHORT)
-            kv.optionval = (char*) "short";
+            falconXNSetSincKeyValue(&kv, "short");
         else if (*value == XIA_DECAY_VERY_SHORT)
-            kv.optionval = (char*) "very-short";
+            falconXNSetSincKeyValue(&kv, "very-short");
         else {
             status = XIA_BAD_VALUE;
             pslLog(PSL_LOG_ERROR, status,
@@ -2182,7 +2322,7 @@ ACQ_HANDLER_DECL(decay_time)
             return status;
         }
 
-        status = psl__SetParam(module, detector, &kv);
+        status = psl__SetParam(module, channel, &kv);
         if (status != XIA_SUCCESS) {
             pslLog(PSL_LOG_ERROR, status,
                    "Unable to set the attenuation");
@@ -2199,6 +2339,7 @@ ACQ_HANDLER_DECL(dc_offset)
 
     UNUSED(defaults);
     UNUSED(fDetector);
+    UNUSED(detector);
 
     ACQ_HANDLER_LOG(dc_offset);
 
@@ -2224,7 +2365,7 @@ ACQ_HANDLER_DECL(dc_offset)
         kv.has_floatval = TRUE_;
         kv.floatval = *value;
 
-        status = psl__SetParam(module, detector, &kv);
+        status = psl__SetParam(module, channel, &kv);
         if (status != XIA_SUCCESS) {
             pslLog(PSL_LOG_ERROR, status,
                    "Unable to set the parameter for DC offset");
@@ -2241,6 +2382,7 @@ ACQ_HANDLER_DECL(reset_blanking_enable)
 
     UNUSED(defaults);
     UNUSED(fDetector);
+    UNUSED(detector);
 
     ACQ_HANDLER_LOG(reset_blanking_enable);
 
@@ -2266,7 +2408,7 @@ ACQ_HANDLER_DECL(reset_blanking_enable)
         kv.has_boolval = TRUE_;
         kv.boolval = *value != 0;
 
-        status = psl__SetParam(module, detector, &kv);
+        status = psl__SetParam(module, channel, &kv);
         if (status != XIA_SUCCESS) {
             pslLog(PSL_LOG_ERROR, status,
                    "Unable to set the parameter for reset blanking enable");
@@ -2283,6 +2425,7 @@ ACQ_HANDLER_DECL(reset_blanking_threshold)
 
     UNUSED(defaults);
     UNUSED(fDetector);
+    UNUSED(detector);
 
     ACQ_HANDLER_LOG(reset_blanking_threshold);
 
@@ -2308,7 +2451,7 @@ ACQ_HANDLER_DECL(reset_blanking_threshold)
         kv.has_floatval = TRUE_;
         kv.floatval = *value;
 
-        status = psl__SetParam(module, detector, &kv);
+        status = psl__SetParam(module, channel, &kv);
         if (status != XIA_SUCCESS) {
             pslLog(PSL_LOG_ERROR, status,
                    "Unable to set the parameter for reset blanking threshold");
@@ -2325,6 +2468,7 @@ ACQ_HANDLER_DECL(reset_blanking_presamples)
 
     UNUSED(defaults);
     UNUSED(fDetector);
+    UNUSED(detector);
 
     ACQ_HANDLER_LOG(reset_blanking_presamples);
 
@@ -2350,7 +2494,7 @@ ACQ_HANDLER_DECL(reset_blanking_presamples)
         kv.has_intval = TRUE_;
         kv.intval = (int64_t)*value;
 
-        status = psl__SetParam(module, detector, &kv);
+        status = psl__SetParam(module, channel, &kv);
         if (status != XIA_SUCCESS) {
             pslLog(PSL_LOG_ERROR, status,
                    "Unable to set parameter for reset blanking pre-samples");
@@ -2367,6 +2511,7 @@ ACQ_HANDLER_DECL(reset_blanking_postsamples)
 
     UNUSED(defaults);
     UNUSED(fDetector);
+    UNUSED(detector);
 
     ACQ_HANDLER_LOG(reset_blanking_postsamples);
 
@@ -2392,7 +2537,7 @@ ACQ_HANDLER_DECL(reset_blanking_postsamples)
         kv.has_intval = TRUE_;
         kv.intval = (int64_t)*value;
 
-        status = psl__SetParam(module, detector, &kv);
+        status = psl__SetParam(module, channel, &kv);
         if (status != XIA_SUCCESS) {
             pslLog(PSL_LOG_ERROR, status,
                    "Unable to set parameter for reset blanking post-samples");
@@ -2409,6 +2554,7 @@ ACQ_HANDLER_DECL(detection_threshold)
 
     UNUSED(defaults);
     UNUSED(fDetector);
+    UNUSED(detector);
 
     ACQ_HANDLER_LOG(detection_threshold);
 
@@ -2434,7 +2580,7 @@ ACQ_HANDLER_DECL(detection_threshold)
         kv.has_floatval = TRUE_;
         kv.floatval = *value;
 
-        status = psl__SetParam(module, detector, &kv);
+        status = psl__SetParam(module, channel, &kv);
         if (status != XIA_SUCCESS) {
             pslLog(PSL_LOG_ERROR, status,
                    "Unable to set the parameter for pulse detection threshold");
@@ -2451,6 +2597,7 @@ ACQ_HANDLER_DECL(min_pulse_pair_separation)
 
     UNUSED(defaults);
     UNUSED(fDetector);
+    UNUSED(detector);
 
     ACQ_HANDLER_LOG(min_pulse_pair_separation);
 
@@ -2476,7 +2623,7 @@ ACQ_HANDLER_DECL(min_pulse_pair_separation)
         kv.has_intval = TRUE_;
         kv.intval = (int64_t)*value;
 
-        status = psl__SetParam(module, detector, &kv);
+        status = psl__SetParam(module, channel, &kv);
         if (status != XIA_SUCCESS) {
             pslLog(PSL_LOG_ERROR, status,
                    "Unable to set parameter for minimum pulse pair separation");
@@ -2493,6 +2640,7 @@ ACQ_HANDLER_DECL(detection_filter)
 
     UNUSED(defaults);
     UNUSED(fDetector);
+    UNUSED(detector);
 
 
     ACQ_HANDLER_LOG(detection_filter);
@@ -2542,15 +2690,15 @@ ACQ_HANDLER_DECL(detection_filter)
         si_toro__sinc__key_value__init(&kv);
         kv.key = (char*) "pulse.sourceType";
         if (*value == XIA_FILTER_LOW_ENERGY)
-            kv.optionval = (char*) "lowEnergy";
+            falconXNSetSincKeyValue(&kv, "lowEnergy");
         else if (*value == XIA_FILTER_LOW_RATE)
-            kv.optionval = (char*) "lowRate";
+            falconXNSetSincKeyValue(&kv, "lowRate");
         else if (*value == XIA_FILTER_MID_RATE)
-            kv.optionval = (char*) "midRate";
+            falconXNSetSincKeyValue(&kv, "midRate");
         else if (*value == XIA_FILTER_HIGH_RATE)
-            kv.optionval = (char*) "highRate";
+            falconXNSetSincKeyValue(&kv, "highRate");
         else if (*value == XIA_FILTER_MAX_THROUGHPUT)
-            kv.optionval = (char*) "maxThroughput";
+            falconXNSetSincKeyValue(&kv, "maxThroughput");
         else {
             status = XIA_BAD_VALUE;
             pslLog(PSL_LOG_ERROR, status,
@@ -2558,7 +2706,7 @@ ACQ_HANDLER_DECL(detection_filter)
             return status;
         }
 
-        status = psl__SetParam(module, detector, &kv);
+        status = psl__SetParam(module, channel, &kv);
         if (status != XIA_SUCCESS) {
             pslLog(PSL_LOG_ERROR, status,
                    "Unable to set the source type");
@@ -2733,7 +2881,7 @@ ACQ_HANDLER_DECL(number_mca_channels)
             return status;
         }
 
-        status = psl__SyncNumberMCAChannels(module, detector, (int64_t) *value, -1);
+        status = psl__SyncNumberMCAChannels(module, fDetector, (int64_t) *value, -1);
         if (status != XIA_SUCCESS) {
             pslLog(PSL_LOG_ERROR, status,
                    "Unable to sync bin sub region to set number_mca_channels");
@@ -2750,6 +2898,7 @@ ACQ_HANDLER_DECL(mca_spectrum_accepted)
 
     UNUSED(defaults);
     UNUSED(fDetector);
+    UNUSED(detector);
 
     ACQ_HANDLER_LOG(mca_spectrum_accepted);
 
@@ -2776,7 +2925,7 @@ ACQ_HANDLER_DECL(mca_spectrum_accepted)
         kv.has_boolval = TRUE_;
         kv.boolval = *value != 0;
 
-        status = psl__SetParam(module, detector, &kv);
+        status = psl__SetParam(module, channel, &kv);
         if (status != XIA_SUCCESS) {
             pslLog(PSL_LOG_ERROR, status,
                    "Unable to set the histogram select accepted");
@@ -2793,6 +2942,7 @@ ACQ_HANDLER_DECL(mca_spectrum_rejected)
 
     UNUSED(defaults);
     UNUSED(fDetector);
+    UNUSED(detector);
 
     ACQ_HANDLER_LOG(mca_spectrum_rejected);
 
@@ -2819,7 +2969,7 @@ ACQ_HANDLER_DECL(mca_spectrum_rejected)
         kv.has_boolval = TRUE_;
         kv.boolval = *value != 0;
 
-        status = psl__SetParam(module, detector, &kv);
+        status = psl__SetParam(module, channel, &kv);
         if (status != XIA_SUCCESS) {
             pslLog(PSL_LOG_ERROR, status,
                    "Unable to set the histogram select rejected");
@@ -2836,6 +2986,7 @@ ACQ_HANDLER_DECL(mca_start_channel)
 
     UNUSED(defaults);
     UNUSED(fDetector);
+    UNUSED(detector);
 
     ACQ_HANDLER_LOG(mca_start_channel);
 
@@ -2862,14 +3013,14 @@ ACQ_HANDLER_DECL(mca_start_channel)
         kv.has_intval = TRUE_;
         kv.intval = (int64_t)*value;
 
-        status = psl__SetParam(module, detector, &kv);
+        status = psl__SetParam(module, channel, &kv);
         if (status != XIA_SUCCESS) {
             pslLog(PSL_LOG_ERROR, status,
                    "Unable to set the histogram bin subregion lower index");
             return status;
         }
 
-        status = psl__SyncNumberMCAChannels(module, detector, -1, kv.intval);
+        status = psl__SyncNumberMCAChannels(module, fDetector, -1, kv.intval);
         if (status != XIA_SUCCESS) {
             pslLog(PSL_LOG_ERROR, status,
                    "Unable to sync bin sub region for setting mca_start_channel");
@@ -2886,6 +3037,7 @@ ACQ_HANDLER_DECL(mca_refresh)
 
     UNUSED(defaults);
     UNUSED(fDetector);
+    UNUSED(detector);
 
     ACQ_HANDLER_LOG(mca_refresh);
 
@@ -2894,7 +3046,7 @@ ACQ_HANDLER_DECL(mca_refresh)
     }
     else {
         /* Set to the box for validation. */
-        status = psl__SetMCARefresh(module, detector, *value);
+        status = psl__SetMCARefresh(module, channel, *value);
         if (status != XIA_SUCCESS) {
             pslLog(PSL_LOG_ERROR, status,
                    "Unable to set the histogram refresh period");
@@ -2913,6 +3065,7 @@ ACQ_HANDLER_DECL(preset_value)
     boolean_t useIntVal = TRUE_;
 
     UNUSED(defaults);
+    UNUSED(detector);
 
     ACQ_HANDLER_LOG(preset_value);
 
@@ -2987,7 +3140,7 @@ ACQ_HANDLER_DECL(preset_value)
             kv.floatval = *value;
         }
 
-        status = psl__SetParam(module, detector, &kv);
+        status = psl__SetParam(module, channel, &kv);
         if (status != XIA_SUCCESS) {
             pslLog(PSL_LOG_ERROR, status,
                    "Unable to set the histogram fixed time duration");
@@ -3004,6 +3157,7 @@ ACQ_HANDLER_DECL(scale_factor)
 
     UNUSED(defaults);
     UNUSED(fDetector);
+    UNUSED(detector);
 
     ACQ_HANDLER_LOG(scale_factor);
 
@@ -3032,7 +3186,7 @@ ACQ_HANDLER_DECL(scale_factor)
         kv.has_intval = TRUE_;
         kv.intval = (int64_t)cbs;
 
-        status = psl__SetParam(module, detector, &kv);
+        status = psl__SetParam(module, channel, &kv);
         if (status != XIA_SUCCESS) {
             pslLog(PSL_LOG_ERROR, status,
                    "Unable to set histogram.coarseBinScaling for scale_factor");
@@ -3047,7 +3201,7 @@ ACQ_HANDLER_DECL(scale_factor)
         kv.has_floatval = TRUE_;
         kv.floatval = psf;
 
-        status = psl__SetParam(module, detector, &kv);
+        status = psl__SetParam(module, channel, &kv);
         if (status != XIA_SUCCESS) {
             pslLog(PSL_LOG_ERROR, status,
                    "Unable to set pulse.scaleFactor for scale_factor");
@@ -3135,13 +3289,13 @@ ACQ_HANDLER_DECL(sca_trigger_mode)
         si_toro__sinc__key_value__init(&kv);
         kv.key = (char*) "instrument.sca.generationTrigger";
         if (*value == SCA_TRIGGER_OFF)
-            kv.optionval = (char*) "off";
+            falconXNSetSincKeyValue(&kv, "off");
         else if (*value == SCA_TRIGGER_HIGH)
-            kv.optionval = (char*) "whenHigh";
+            falconXNSetSincKeyValue(&kv, "whenHigh");
         else if (*value == SCA_TRIGGER_LOW)
-            kv.optionval = (char*) "whenLow";
+            falconXNSetSincKeyValue(&kv, "whenLow");
         else if (*value == SCA_TRIGGER_ALWAYS)
-            kv.optionval = (char*) "always";
+            falconXNSetSincKeyValue(&kv, "always");
         else {
             status = XIA_BAD_VALUE;
             pslLog(PSL_LOG_ERROR, status,
@@ -3149,7 +3303,7 @@ ACQ_HANDLER_DECL(sca_trigger_mode)
             return status;
         }
 
-        status = psl__SetParam(module, detector, &kv);
+        status = psl__SetParam(module, channel, &kv);
         if (status != XIA_SUCCESS) {
             pslLog(PSL_LOG_ERROR, status,
                    "Unable to set the sca generationTrigger");
@@ -3193,7 +3347,7 @@ ACQ_HANDLER_DECL(sca_pulse_duration)
         kv.has_intval = TRUE_;
         kv.intval = (int64_t)*value;
 
-        status = psl__SetParam(module, detector, &kv);
+        status = psl__SetParam(module, channel, &kv);
         if (status != XIA_SUCCESS) {
             pslLog(PSL_LOG_ERROR, status,
                    "Unable to set parameter instrument.sca.pulseDuration");
@@ -3210,6 +3364,7 @@ ACQ_HANDLER_DECL(number_of_scas)
 
     int max_number_of_scas = 0;
     int number_of_scas = (int)*value;
+    int i;
 
     UNUSED(detector);
     UNUSED(fDetector);
@@ -3227,6 +3382,38 @@ ACQ_HANDLER_DECL(number_of_scas)
                    "number of sca %d greater than maximum allowed (%d).",
                    number_of_scas, max_number_of_scas);
             return status;
+        }
+
+        /* Set sca bounds to 0 before removing */
+        char keyname[24];
+        SiToro__Sinc__KeyValue kv;
+        si_toro__sinc__key_value__init(&kv);
+        kv.has_intval = TRUE_;
+        kv.intval = 0;
+
+        for (i = number_of_scas; i < module->ch[channel].n_sca; i++) {
+            /* Convert Handel 0-based indexing to sinc 1-based. */
+            snprintf(keyname, sizeof(keyname),
+                     "sca.region_%02" PRIu16 ".startBin", i + 1);
+
+            kv.key =  keyname;
+            status = psl__SetParam(module, channel, &kv);
+
+            if (status != XIA_SUCCESS) {
+                pslLog(PSL_LOG_ERROR, status, "Unable to remove SCA start limit");
+                return status;
+            }
+
+            snprintf(keyname, sizeof(keyname),
+                     "sca.region_%02" PRIu16 ".endBin", i + 1);
+
+            kv.key =  keyname;
+            status = psl__SetParam(module, channel, &kv);
+
+            if (status != XIA_SUCCESS) {
+                pslLog(PSL_LOG_ERROR, status, "Unable to remove SCA end limit");
+                return status;
+            }
         }
 
         status = pslSetNumberSCAs(module, defaults, channel, number_of_scas);
@@ -3294,7 +3481,7 @@ ACQ_HANDLER_DECL(sca)
         kv.has_intval = TRUE_;
         kv.intval = (int64_t)*value;
 
-        status = psl__SetParam(module, detector, &kv);
+        status = psl__SetParam(module, channel, &kv);
         if (status != XIA_SUCCESS) {
             pslLog(PSL_LOG_ERROR, status, "Unable to set the SCA limit");
             return status;
@@ -3490,7 +3677,7 @@ PSL_STATIC int psl__GainCalibrate(int detChan, Detector *det, int modChan,
     UNUSED(def);
     UNUSED(delta);
 
-    fDetector = det->pslData;
+    fDetector = psl__FindDetector(m, modChan);
 
     scale_factor = psl__GetAcqValue(fDetector, "scale_factor");
 
@@ -3512,7 +3699,7 @@ PSL_STATIC int psl__GainCalibrate(int detChan, Detector *det, int modChan,
     return status;
 }
 
-PSL_STATIC int psl__StartHistogram(Module* module, Detector* detector, int channel)
+PSL_STATIC int psl__StartHistogram(Module* module, int channel)
 {
     int status;
 
@@ -3524,20 +3711,20 @@ PSL_STATIC int psl__StartHistogram(Module* module, Detector* detector, int chann
     FalconXNDetector* fDetector;
 
     pslLog(PSL_LOG_DEBUG, "Starting Histograms on channel %s:%d",
-           detector->alias, channel);
+           module->alias, channel);
 
-    status = psl__DetectorLock(detector);
+    fDetector = psl__FindDetector(module, channel);
+
+    status = psl__DetectorLock(fDetector);
     if (status != XIA_SUCCESS) {
         return status;
     }
-
-    fDetector = detector->pslData;
 
     if (fDetector->channelState == ChannelHistogram) {
         state_Is_ChannelHistogram = TRUE_;
     }
 
-    status = psl__DetectorUnlock(detector);
+    status = psl__DetectorUnlock(fDetector);
     if (status != XIA_SUCCESS) {
         return status;
     }
@@ -3559,11 +3746,11 @@ PSL_STATIC int psl__StartHistogram(Module* module, Detector* detector, int chann
         if (status != XIA_SUCCESS) {
             pslLog(PSL_LOG_ERROR, status,
                    "Unable to start the run for channel %s:%d",
-                   detector->alias, channel);
+                   module->alias, channel);
             return status;
         }
 
-        status = psl__DetectorLock(detector);
+        status = psl__DetectorLock(fDetector);
         if (status != XIA_SUCCESS) {
             return status;
         }
@@ -3577,18 +3764,18 @@ PSL_STATIC int psl__StartHistogram(Module* module, Detector* detector, int chann
             fDetector->asyncReady = TRUE_;
         }
 
-        status = psl__DetectorUnlock(detector);
+        status = psl__DetectorUnlock(fDetector);
         if (status != XIA_SUCCESS) {
             return status;
         }
 
         if (!state_Is_ChannelHistogram) {
-            status = psl__DetectorWait(detector,
+            status = psl__DetectorWait(fDetector,
                                        FALCONXN_CHANNEL_STATE_TIMEOUT * 1000);
             if (status != XIA_SUCCESS) {
                 pslLog(PSL_LOG_ERROR, status,
                        "Start run data error or timeout for channel %s:%d",
-                       detector->alias, channel);
+                       module->alias, channel);
                 return status;
             }
         }
@@ -3597,7 +3784,7 @@ PSL_STATIC int psl__StartHistogram(Module* module, Detector* detector, int chann
     return status;
 }
 
-PSL_STATIC int psl__StopHistogram(Module* module, Detector* detector, int channel)
+PSL_STATIC int psl__StopHistogram(Module* module, int channel)
 {
     int status;
 
@@ -3606,7 +3793,7 @@ PSL_STATIC int psl__StopHistogram(Module* module, Detector* detector, int channe
     boolean_t state_Is_ChannelReady = FALSE_;
 
     pslLog(PSL_LOG_DEBUG, "Stopping Histograms on channel %s:%d",
-           detector->alias, channel);
+           module->alias, channel);
 
     /*
      * Always send. Do not check the local state.
@@ -3618,7 +3805,9 @@ PSL_STATIC int psl__StopHistogram(Module* module, Detector* detector, int channe
         return status;
     }
 
-    status = psl__DetectorLock(detector);
+    fDetector = psl__FindDetector(module, channel);
+
+    status = psl__DetectorLock(fDetector);
     if (status != XIA_SUCCESS) {
         return status;
     }
@@ -3627,21 +3816,19 @@ PSL_STATIC int psl__StopHistogram(Module* module, Detector* detector, int channe
      * Wait for the ready state.
      */
 
-    fDetector = detector->pslData;
-
     if (fDetector->channelState == ChannelReady) {
         state_Is_ChannelReady = TRUE_;
     } else {
         fDetector->asyncReady = TRUE_;
     }
 
-    status = psl__DetectorUnlock(detector);
+    status = psl__DetectorUnlock(fDetector);
     if (status != XIA_SUCCESS) {
         return status;
     }
 
     if (!state_Is_ChannelReady) {
-        status = psl__DetectorWait(detector,
+        status = psl__DetectorWait(fDetector,
                                    FALCONXN_CHANNEL_STATE_TIMEOUT * 1000);
         if (status != XIA_SUCCESS) {
             pslLog(PSL_LOG_ERROR, status,
@@ -3653,19 +3840,15 @@ PSL_STATIC int psl__StopHistogram(Module* module, Detector* detector, int channe
     return status;
 }
 
-PSL_STATIC int psl__Stop_MappingMode_0(Module* module, Detector* detector)
+PSL_STATIC int psl__Stop_MappingMode_0(Module* module)
 {
     int status = XIA_SUCCESS;
     int cstatus = XIA_SUCCESS;
 
     int channel;
 
-    UNUSED(detector);
-
     for (channel = 0; channel < (int) module->number_of_channels; channel++) {
-
-        Detector* chanDetector;
-        FalconXNDetector* fDetector;
+        if (module->channels[channel] == DISABLED_CHANNEL) continue;
 
         /*
          * Latch the first error we see and return that. Continue and
@@ -3674,17 +3857,7 @@ PSL_STATIC int psl__Stop_MappingMode_0(Module* module, Detector* detector)
         if ((status == XIA_SUCCESS) && (cstatus != XIA_SUCCESS))
             status = cstatus;
 
-        chanDetector = psl__FindDetector(module, channel);
-        if (chanDetector == NULL) {
-            cstatus = XIA_INVALID_DETCHAN;
-            pslLog(PSL_LOG_ERROR, status,
-                   "Cannot find channel %s:%d", module->alias, channel);
-            continue;
-        }
-
-        fDetector = chanDetector->pslData;
-
-        cstatus = psl__StopHistogram(module, chanDetector, channel);
+        cstatus = psl__StopHistogram(module, channel);
     }
 
     if ((status == XIA_SUCCESS) && (cstatus != XIA_SUCCESS))
@@ -3694,37 +3867,31 @@ PSL_STATIC int psl__Stop_MappingMode_0(Module* module, Detector* detector)
 }
 
 PSL_STATIC int psl__Start_MappingMode_0(unsigned short resume,
-                                        Module*        module,
-                                        Detector*      detector)
+                                        Module*        module)
 {
     int status = XIA_SUCCESS;
     int channel;
 
     UNUSED(resume);
-    UNUSED(detector);
+
     for (channel = 0; channel < (int) module->number_of_channels; channel++) {
-        Detector*         chanDetector;
+        if (module->channels[channel] == DISABLED_CHANNEL) continue;
+
         FalconXNDetector* fDetector;
         uint32_t          number_stats;
 
         acqValue number_mca_channels;
 
-        chanDetector = psl__FindDetector(module, channel);
-        if (chanDetector == NULL) {
-            status = XIA_INVALID_DETCHAN;
-            pslLog(PSL_LOG_ERROR, status,
-                   "Cannot find channel %s:%d", module->alias, channel);
-            psl__Stop_MappingMode_0(module, detector);
-            return status;
-        }
+        fDetector = psl__FindDetector(module, channel);
+        ASSERT(fDetector);
 
         /* Translate preset_type to SINC's histogram mode */
-        status = psl__SyncPresetType(module, chanDetector);
+        status = psl__SyncPresetType(module, fDetector);
         if (status != XIA_SUCCESS) {
             pslLog(PSL_LOG_ERROR, status,
                    "Error syncing the preset type for starting mm0: %s:%d",
                    module->alias, channel);
-            psl__Stop_MappingMode_0(module, chanDetector);
+            psl__Stop_MappingMode_0(module);
             return status;
         }
 
@@ -3732,25 +3899,23 @@ PSL_STATIC int psl__Start_MappingMode_0(unsigned short resume,
          * Set the refresh to the configured value since mm1 could have
          * set it to a large value.
          */
-        status = psl__SyncMCARefresh(module, chanDetector);
+        status = psl__SyncMCARefresh(module, fDetector);
         if (status != XIA_SUCCESS) {
             pslLog(PSL_LOG_ERROR, status,
                    "Error syncing mca_refresh for starting mm0: %s:%d",
                    module->alias, channel);
-            psl__Stop_MappingMode_0(module, chanDetector);
+            psl__Stop_MappingMode_0(module);
             return status;
         }
 
-        status = psl__SyncGateVetoMode(module, chanDetector);
+        status = psl__SyncGateVetoMode(module, fDetector);
         if (status != XIA_SUCCESS) {
             pslLog(PSL_LOG_ERROR, status,
                    "Error syncing gate veto mode for starting mm0: %s:%d",
                    module->alias, channel);
-            psl__Stop_MappingMode_0(module, chanDetector);
+            psl__Stop_MappingMode_0(module);
             return status;
         }
-
-        fDetector = chanDetector->pslData;
 
         number_mca_channels = psl__GetAcqValue(fDetector, "number_mca_channels");
 
@@ -3761,13 +3926,13 @@ PSL_STATIC int psl__Start_MappingMode_0(unsigned short resume,
             pslLog(PSL_LOG_ERROR, status,
                    "SINC stats size is not 32bit aligned: %s:%d",
                    module->alias, channel);
-            psl__Stop_MappingMode_0(module, detector);
+            psl__Stop_MappingMode_0(module);
             return status;
         }
 
         number_stats = sizeof(SincHistogramCountStats) / sizeof(uint32_t);
 
-        status = psl__DetectorLock(chanDetector);
+        status = psl__DetectorLock(fDetector);
         if (status != XIA_SUCCESS)
             return status;
 
@@ -3776,10 +3941,10 @@ PSL_STATIC int psl__Start_MappingMode_0(unsigned short resume,
          */
         status = psl__MappingModeControl_CloseAny(&fDetector->mmc);
         if (status != XIA_SUCCESS) {
-            psl__DetectorUnlock(chanDetector);
+            psl__DetectorUnlock(fDetector);
             pslLog(PSL_LOG_ERROR, status,
                    "Error closing the last mapping mode control");
-            psl__Stop_MappingMode_0(module, detector);
+            psl__Stop_MappingMode_0(module);
             return status;
         }
 
@@ -3788,39 +3953,40 @@ PSL_STATIC int psl__Start_MappingMode_0(unsigned short resume,
                                                  number_stats);
 
         if (status != XIA_SUCCESS) {
-            psl__DetectorUnlock(chanDetector);
+            psl__DetectorUnlock(fDetector);
             pslLog(PSL_LOG_ERROR, status,
                    "Error opening the mapping mode control");
-            psl__Stop_MappingMode_0(module, detector);
+            psl__Stop_MappingMode_0(module);
             return status;
         }
 
-        status = psl__DetectorUnlock(chanDetector);
+        status = psl__DetectorUnlock(fDetector);
         if (status != XIA_SUCCESS)
             return status;
     }
 
     /*
      * Start the run one channel at a time for all channels in the module for
-     * Handel multi-channel device compatibility.
+     * Handel multi-channel device compatibility. Skip channels which do not
+     * have valid pulse calibration.
      *
      * Return on any error stopping all channels.
      */
     for (channel = 0; channel < (int) module->number_of_channels; channel++) {
-        Detector*         chanDetector;
+        if (module->channels[channel] == DISABLED_CHANNEL) continue;
 
-        chanDetector = psl__FindDetector(module, channel);
-        if (chanDetector == NULL) {
-            status = XIA_INVALID_DETCHAN;
-            pslLog(PSL_LOG_ERROR, status,
-                   "Cannot find channel %s:%d", module->alias, channel);
-            psl__Stop_MappingMode_0(module, detector);
-            return status;
+        FalconXNDetector* fDetector = psl__FindDetector(module, channel);
+        ASSERT(fDetector);
+
+        if (!psl__GetCalibrated(module, fDetector)) {
+            pslLog(PSL_LOG_INFO, "Skip run for uncalibrated channel "
+                    "%s:%d", module->alias, channel);
+            continue;
         }
 
-        status = psl__StartHistogram(module, chanDetector, channel);
+        status = psl__StartHistogram(module, channel);
         if (status != XIA_SUCCESS) {
-            psl__Stop_MappingMode_0(module, detector);
+            psl__Stop_MappingMode_0(module);
             return status;
         }
     }
@@ -3831,18 +3997,15 @@ PSL_STATIC int psl__Start_MappingMode_0(unsigned short resume,
 /*
  * Mapping Mode 1: Full Spectrum Mapping.
  */
-PSL_STATIC int psl__Stop_MappingMode_1(Module* module, Detector* detector)
+PSL_STATIC int psl__Stop_MappingMode_1(Module* module)
 {
     int status = XIA_SUCCESS;
     int cstatus = XIA_SUCCESS;
 
     int channel;
 
-    UNUSED(detector);
-
     for (channel = 0; channel < (int) module->number_of_channels; channel++) {
-        Detector* chanDetector;
-        FalconXNDetector* fDetector;
+        if (module->channels[channel] == DISABLED_CHANNEL) continue;
 
         /*
          * Latch the first error we see and return that. Continue and
@@ -3851,17 +4014,7 @@ PSL_STATIC int psl__Stop_MappingMode_1(Module* module, Detector* detector)
         if ((status == XIA_SUCCESS) && (cstatus != XIA_SUCCESS))
             status = cstatus;
 
-        chanDetector = psl__FindDetector(module, channel);
-        if (chanDetector == NULL) {
-            cstatus = XIA_INVALID_DETCHAN;
-            pslLog(PSL_LOG_ERROR, status,
-                   "Cannot find channel %s:%d", module->alias, channel);
-            continue;
-        }
-
-        fDetector = chanDetector->pslData;
-
-        cstatus = psl__StopHistogram(module, chanDetector, channel);
+        cstatus = psl__StopHistogram(module, channel);
     }
 
     if ((status == XIA_SUCCESS) && (cstatus != XIA_SUCCESS))
@@ -3870,60 +4023,49 @@ PSL_STATIC int psl__Stop_MappingMode_1(Module* module, Detector* detector)
     return status;
 }
 
-PSL_STATIC int psl__Start_MappingMode_1(unsigned short resume,
-                                        Module* module, Detector* detector)
+PSL_STATIC int psl__Start_MappingMode_1(unsigned short resume, Module* module)
 {
     int status = XIA_SUCCESS;
+    FalconXNModule* fModule = module->pslData;
     int channel;
 
     UNUSED(resume);
-    UNUSED(detector);
 
     /*
      * Update settings for mm1.
      */
     for (channel = 0; channel < (int) module->number_of_channels; channel++) {
-
-        Detector*         chanDetector;
-        FalconXNDetector* fDetector;
+        if (module->channels[channel] == DISABLED_CHANNEL) continue;
 
         acqValue number_mca_channels;
         acqValue num_map_pixels;
         acqValue num_map_pixels_per_buffer;
         acqValue pixel_advance_mode;
 
-        chanDetector = psl__FindDetector(module, channel);
-        if (chanDetector == NULL) {
-            status = XIA_INVALID_DETCHAN;
-            pslLog(PSL_LOG_ERROR, status,
-                   "Cannot find channel %s:%d", module->alias, channel);
-            psl__Stop_MappingMode_1(module, detector);
-            return status;
-        }
+        FalconXNDetector* fDetector = psl__FindDetector(module, channel);
+        ASSERT(fDetector);
 
         /*
          * Translate pixel_advance_mode to the SINC histogram mode to
          * control data collection.
          */
-        status = psl__SyncPixelAdvanceMode(module, chanDetector);
+        status = psl__SyncPixelAdvanceMode(module, fDetector);
         if (status != XIA_SUCCESS) {
             pslLog(PSL_LOG_ERROR, status,
                    "Error syncing the pixel advance mode for starting mm1: %s:%d",
                    module->alias, channel);
-            psl__Stop_MappingMode_1(module, chanDetector);
+            psl__Stop_MappingMode_1(module);
             return status;
         }
 
-        status = psl__ClearGateVetoMode(module, chanDetector);
+        status = psl__ClearGateVetoMode(module, fDetector);
         if (status != XIA_SUCCESS) {
             pslLog(PSL_LOG_ERROR, status,
                    "Error clearing the GATE veto for starting mm1: %s:%d",
                    module->alias, channel);
-            psl__Stop_MappingMode_1(module, chanDetector);
+            psl__Stop_MappingMode_1(module);
             return status;
         }
-
-        fDetector = chanDetector->pslData;
 
         number_mca_channels = psl__GetAcqValue(fDetector, "number_mca_channels");
         num_map_pixels = psl__GetAcqValue(fDetector, "num_map_pixels");
@@ -3937,9 +4079,9 @@ PSL_STATIC int psl__Start_MappingMode_1(unsigned short resume,
          * disable histograms so we only receive them on GATE transitions.
          */
         if (pixel_advance_mode.ref.i == XIA_MAPPING_CTL_USER)
-            status = psl__SyncMCARefresh(module, chanDetector);
+            status = psl__SyncMCARefresh(module, fDetector);
         else
-            status = psl__SetMCARefresh(module, chanDetector, SINC_HIST_REFRESH_DISABLE);
+            status = psl__SetMCARefresh(module, channel, SINC_HIST_REFRESH_DISABLE);
 
         if (status != XIA_SUCCESS) {
             pslLog(PSL_LOG_ERROR, status,
@@ -3953,7 +4095,7 @@ PSL_STATIC int psl__Start_MappingMode_1(unsigned short resume,
          * collection mode.
          */
         if (pixel_advance_mode.ref.i == XIA_MAPPING_CTL_GATE) {
-            status = psl__SyncGateCollectionMode(module, chanDetector);
+            status = psl__SyncGateCollectionMode(module, fDetector);
 
             if (status != XIA_SUCCESS) {
                 pslLog(PSL_LOG_ERROR, status,
@@ -3963,7 +4105,7 @@ PSL_STATIC int psl__Start_MappingMode_1(unsigned short resume,
             }
         }
 
-        status = psl__DetectorLock(chanDetector);
+        status = psl__DetectorLock(fDetector);
         if (status != XIA_SUCCESS)
             return status;
 
@@ -3972,7 +4114,7 @@ PSL_STATIC int psl__Start_MappingMode_1(unsigned short resume,
          */
         status = psl__MappingModeControl_CloseAny(&fDetector->mmc);
         if (status != XIA_SUCCESS) {
-            psl__DetectorUnlock(chanDetector);
+            psl__DetectorUnlock(fDetector);
             pslLog(PSL_LOG_ERROR, status,
                    "Error closing the last mapping mode control");
             return status;
@@ -3981,13 +4123,13 @@ PSL_STATIC int psl__Start_MappingMode_1(unsigned short resume,
         status = psl__MappingModeControl_OpenMM1(&fDetector->mmc,
                                                  fDetector->detChan,
                                                  FALSE_,
-                                                 fDetector->runNumber,
+                                                 fModule->runNumber,
                                                  num_map_pixels.ref.i,
                                                  (uint16_t)number_mca_channels.ref.i,
                                                  num_map_pixels_per_buffer.ref.i);
 
         if (status != XIA_SUCCESS) {
-            psl__DetectorUnlock(chanDetector);
+            psl__DetectorUnlock(fDetector);
             pslLog(PSL_LOG_ERROR, status,
                    "Error opening the mapping mode control");
             return status;
@@ -4003,7 +4145,7 @@ PSL_STATIC int psl__Start_MappingMode_1(unsigned short resume,
             mm1->pixelAdvanceCounter = -1;
         }
 
-        status = psl__DetectorUnlock(chanDetector);
+        status = psl__DetectorUnlock(fDetector);
         if (status != XIA_SUCCESS)
             return status;
     }
@@ -4015,20 +4157,20 @@ PSL_STATIC int psl__Start_MappingMode_1(unsigned short resume,
      * Return on any error stopping all channels.
      */
     for (channel = 0; channel < (int) module->number_of_channels; channel++) {
-        Detector*         chanDetector;
+        if (module->channels[channel] == DISABLED_CHANNEL) continue;
 
-        chanDetector = psl__FindDetector(module, channel);
-        if (chanDetector == NULL) {
-            status = XIA_INVALID_DETCHAN;
-            pslLog(PSL_LOG_ERROR, status,
-                   "Cannot find channel %s:%d", module->alias, channel);
-            psl__Stop_MappingMode_1(module, detector);
-            return status;
+        FalconXNDetector* fDetector = psl__FindDetector(module, channel);
+        ASSERT(fDetector);
+
+        if (!psl__GetCalibrated(module, fDetector)) {
+            pslLog(PSL_LOG_INFO, "Skip run for uncalibrated channel "
+                    "%s:%d", module->alias, channel);
+            continue;
         }
 
-        status = psl__StartHistogram(module, chanDetector, channel);
+        status = psl__StartHistogram(module, channel);
         if (status != XIA_SUCCESS) {
-            psl__Stop_MappingMode_1(module, detector);
+            psl__Stop_MappingMode_1(module);
             return status;
         }
     }
@@ -4043,11 +4185,15 @@ PSL_STATIC int psl__StartRun(int detChan, unsigned short resume, XiaDefaults *de
 
     UNUSED(defs);
 
-    FalconXNDetector* fDetector = detector->pslData;
+    FalconXNModule* fModule;
+    FalconXNDetector* fDetector;
 
     acqValue mapping_mode;
 
-    xiaPSLBadArgs(module, detector, "psl__StartRun");
+    xiaPSLBadArgs(detChan, module, detector);
+
+    fModule = module->pslData;
+    fDetector = psl__FindDetector(module, xiaGetModChan(detChan));
 
     mapping_mode = psl__GetAcqValue(fDetector, "mapping_mode");
 
@@ -4058,10 +4204,10 @@ PSL_STATIC int psl__StartRun(int detChan, unsigned short resume, XiaDefaults *de
     switch (mapping_mode.ref.i)
     {
     case 0:
-        status = psl__Start_MappingMode_0(resume, module, detector);
+        status = psl__Start_MappingMode_0(resume, module);
         break;
     case 1:
-        status = psl__Start_MappingMode_1(resume, module, detector);
+        status = psl__Start_MappingMode_1(resume, module);
         break;
     default:
         status = XIA_INVALID_VALUE;
@@ -4071,7 +4217,7 @@ PSL_STATIC int psl__StartRun(int detChan, unsigned short resume, XiaDefaults *de
     }
 
     if (status == XIA_SUCCESS)
-        ++fDetector->runNumber;
+        ++fModule->runNumber;
 
     return status;
 }
@@ -4082,9 +4228,11 @@ PSL_STATIC int psl__StopRun(int detChan, Detector *detector, Module *module)
 
     acqValue mapping_mode;
 
-    FalconXNDetector* fDetector = detector->pslData;
+    FalconXNDetector* fDetector;
 
-    xiaPSLBadArgs(module, detector, "psl__StopRun");
+    xiaPSLBadArgs(detChan, module, detector);
+
+    fDetector = psl__FindDetector(module, xiaGetModChan(detChan));
 
     mapping_mode = psl__GetAcqValue(fDetector, "mapping_mode");
 
@@ -4095,9 +4243,9 @@ PSL_STATIC int psl__StopRun(int detChan, Detector *detector, Module *module)
     switch (mapping_mode.ref.i)
     {
     case 0:
-        return psl__Stop_MappingMode_0(module, detector);
+        return psl__Stop_MappingMode_0(module);
     case 1:
-        return psl__Stop_MappingMode_1(module, detector);
+        return psl__Stop_MappingMode_1(module);
     default:
         status = XIA_INVALID_VALUE;
         pslLog(PSL_LOG_ERROR, status,
@@ -4124,10 +4272,10 @@ PSL_STATIC bool psl__mm1_RunningOrReady(FalconXNDetector* fDetector)
 }
 
 PSL_STATIC int psl__mm0_mca_length(int detChan,
-                                   Detector* detector, Module* module,
+                                   int modChan, Module* module,
                                    const char *name, void *value)
 {
-    FalconXNDetector* fDetector = detector->pslData;
+    FalconXNDetector* fDetector = psl__FindDetector(module, modChan);
 
     acqValue number_mca_channels;
 
@@ -4148,12 +4296,12 @@ PSL_STATIC int psl__mm0_mca_length(int detChan,
 }
 
 PSL_STATIC int psl__mm0_mca(int detChan,
-                            Detector* detector, Module* module,
+                            int modChan, Module* module,
                             const char *name, void *value)
 {
     int status = XIA_SUCCESS;
 
-    FalconXNDetector* fDetector = detector->pslData;
+    FalconXNDetector* fDetector = psl__FindDetector(module, modChan);
 
     acqValue mca_spectrum_accepted;
     acqValue mca_spectrum_rejected;
@@ -4174,28 +4322,28 @@ PSL_STATIC int psl__mm0_mca(int detChan,
     mca_spectrum_rejected = psl__GetAcqValue(fDetector, "mca_spectrum_rejected");
 
 
-    status = psl__DetectorLock(detector);
+    status = psl__DetectorLock(fDetector);
     if (status != XIA_SUCCESS) {
         pslLog(PSL_LOG_ERROR, status,
-               "Unable to lock the detector: %s", detector->alias);
+               "Unable to lock the detector: %s:%d", module->alias, modChan);
         return status;
     }
 
     if (!psl__MappingModeControl_IsMode(&fDetector->mmc, MAPPING_MODE_MCA)) {
-        psl__DetectorUnlock(detector);
+        psl__DetectorUnlock(fDetector);
         status = XIA_ILLEGAL_OPERATION;
         pslLog(PSL_LOG_ERROR, status,
-               "Wrong mode for data request: %s", detector->alias);
+               "Wrong mode for data request: %s:%d", module->alias, modChan);
         return status;
     }
 
     mm0 = psl__MappingModeControl_MM0Data(&fDetector->mmc);
 
     if (psl__MappingModeBuffers_Active_Level(&mm0->buffers) == 0) {
-        psl__DetectorUnlock(detector);
+        psl__DetectorUnlock(fDetector);
         status = XIA_NO_SPECTRUM;
         pslLog(PSL_LOG_ERROR, status,
-               "No spectrum yet: %s", detector->alias);
+               "No spectrum yet: %s:%d", module->alias, modChan);
         return status;
     }
 
@@ -4208,11 +4356,11 @@ PSL_STATIC int psl__mm0_mca(int detChan,
                                                  &size);
         if (status != XIA_SUCCESS)
             pslLog(PSL_LOG_ERROR, status,
-                   "Copy out of active data: %s", detector->alias);
+                   "Copy out of active data: %s:%d", module->alias, modChan);
         if (size != mm0->numMCAChannels)
             pslLog(PSL_LOG_ERROR, status,
-                   "Copy out of active data has bad length: %s",
-                   detector->alias);
+                   "Copy out of active data has bad length: %s:%d",
+                   module->alias, modChan);
         buffer += mm0->numMCAChannels;
     }
 
@@ -4223,11 +4371,11 @@ PSL_STATIC int psl__mm0_mca(int detChan,
                                                  &size);
         if (status != XIA_SUCCESS)
             pslLog(PSL_LOG_ERROR, status,
-                   "Copy out of rejected data: %s", detector->alias);
+                   "Copy out of rejected data: %s:%d", module->alias, modChan);
         if (size != mm0->numMCAChannels)
             pslLog(PSL_LOG_ERROR, status,
-                   "Copy out of rejected data has bad length: %s",
-                   detector->alias);
+                   "Copy out of rejected data has bad length: %s:%d",
+                   module->alias, modChan);
         buffer += mm0->numMCAChannels;
     }
 
@@ -4237,29 +4385,33 @@ PSL_STATIC int psl__mm0_mca(int detChan,
                                              &size);
     if (status != XIA_SUCCESS)
         pslLog(PSL_LOG_ERROR, status,
-               "Copy out of stats data: %s", detector->alias);
+               "Copy out of stats data: %s:%d", module->alias, modChan);
     else if (size != mm0->numStats)
         pslLog(PSL_LOG_ERROR, status,
-               "Copy out of stats has bad length: %s",
-               detector->alias);
+               "Copy out of stats has bad length: %s:%d",
+               module->alias, modChan);
 
-    falconXNSetDetectorStats(fDetector, &stats);
+    /*
+     * Update the mm0 stats.
+     */
+    falconXNSetDetectorStats(fDetector->mm0_stats, &stats);
 
-    status = psl__DetectorUnlock(detector);
+
+    status = psl__DetectorUnlock(fDetector);
     if (status != XIA_SUCCESS) {
         pslLog(PSL_LOG_ERROR, status,
-               "Unable to unlock the detector: %s", detector->alias);
+               "Unable to unlock the detector: %s:%d", module->alias, modChan);
     }
 
     return status;
 }
 
 PSL_STATIC int psl__mm0_baseline_length(int detChan,
-                                        Detector* detector, Module* module,
+                                        int modChan, Module* module,
                                         const char *name, void *value)
 {
     UNUSED(detChan);
-    UNUSED(detector);
+    UNUSED(modChan);
     UNUSED(name);
     UNUSED(value);
     UNUSED(module);
@@ -4268,48 +4420,48 @@ PSL_STATIC int psl__mm0_baseline_length(int detChan,
 }
 
 PSL_STATIC int psl__mm0_runtime(int detChan,
-                                Detector* detector, Module* module,
+                                int modChan, Module* module,
                                 const char *name, void *value)
 {
     int status = XIA_SUCCESS;
 
-    FalconXNDetector* fDetector = detector->pslData;
+    FalconXNDetector* fDetector = psl__FindDetector(module, modChan);
 
     UNUSED(detChan);
     UNUSED(name);
     UNUSED(module);
 
-    status = psl__DetectorLock(detector);
+    status = psl__DetectorLock(fDetector);
     if (status != XIA_SUCCESS) {
         pslLog(PSL_LOG_ERROR, status,
-               "Unable to lock the detector: %s", detector->alias);
+               "Unable to lock the detector: %s:%d", module->alias, modChan);
         return status;
     }
 
     *((double*) value) = fDetector->stats[FALCONXN_STATS_TIME_ELAPSED];
 
-    status = psl__DetectorUnlock(detector);
+    status = psl__DetectorUnlock(fDetector);
     if (status != XIA_SUCCESS) {
         pslLog(PSL_LOG_ERROR, status,
-               "Unable to unlock the detector: %s", detector->alias);
+               "Unable to unlock the detector: %s:%d", module->alias, modChan);
     }
 
     return status;
 }
 
 PSL_STATIC int psl__mm0_realtime(int detChan,
-                                 Detector* detector, Module* module,
+                                 int modChan, Module* module,
                                  const char *name, void *value)
 {
-    return psl__mm0_runtime(detChan, detector, module, name, value);
+    return psl__mm0_runtime(detChan, modChan, module, name, value);
 }
 
 PSL_STATIC int psl__mm0_trigger_livetime(int detChan,
-                                         Detector* detector, Module* module,
+                                         int modChan, Module* module,
                                          const char *name, void *value)
 {
     UNUSED(detChan);
-    UNUSED(detector);
+    UNUSED(modChan);
     UNUSED(name);
     UNUSED(value);
     UNUSED(module);
@@ -4318,11 +4470,11 @@ PSL_STATIC int psl__mm0_trigger_livetime(int detChan,
 }
 
 PSL_STATIC int psl__mm0_livetime(int detChan,
-                                 Detector* detector, Module* module,
+                                 int modChan, Module* module,
                                  const char *name, void *value)
 {
     UNUSED(detChan);
-    UNUSED(detector);
+    UNUSED(modChan);
     UNUSED(name);
     UNUSED(value);
     UNUSED(module);
@@ -4331,80 +4483,80 @@ PSL_STATIC int psl__mm0_livetime(int detChan,
 }
 
 PSL_STATIC int psl__mm0_input_count_rate(int detChan,
-                                         Detector* detector, Module* module,
+                                         int modChan, Module* module,
                                          const char *name, void *value)
 {
     int status = XIA_SUCCESS;
 
-    FalconXNDetector* fDetector = detector->pslData;
+    FalconXNDetector* fDetector = psl__FindDetector(module, modChan);
 
     UNUSED(detChan);
     UNUSED(name);
     UNUSED(module);
 
-    status = psl__DetectorLock(detector);
+    status = psl__DetectorLock(fDetector);
     if (status != XIA_SUCCESS) {
         pslLog(PSL_LOG_ERROR, status,
-               "Unable to lock the detector: %s", detector->alias);
+               "Unable to lock the detector: %s:%d", module->alias, modChan);
         return status;
     }
 
     *((double*) value) = fDetector->stats[FALCONXN_STATS_INPUT_COUNT_RATE];
 
-    status = psl__DetectorUnlock(detector);
+    status = psl__DetectorUnlock(fDetector);
     if (status != XIA_SUCCESS) {
         pslLog(PSL_LOG_ERROR, status,
-               "Unable to unlock the detector: %s", detector->alias);
+               "Unable to unlock the detector: %s:%d", module->alias, modChan);
     }
 
     return status;
 }
 
 PSL_STATIC int psl__mm0_output_count_rate(int detChan,
-                                          Detector* detector, Module* module,
+                                          int modChan, Module* module,
                                           const char *name, void *value)
 {
     int status = XIA_SUCCESS;
 
-    FalconXNDetector* fDetector = detector->pslData;
+    FalconXNDetector* fDetector = psl__FindDetector(module, modChan);
 
     UNUSED(detChan);
     UNUSED(name);
     UNUSED(module);
 
-    status = psl__DetectorLock(detector);
+    status = psl__DetectorLock(fDetector);
     if (status != XIA_SUCCESS) {
         pslLog(PSL_LOG_ERROR, status,
-               "Unable to lock the detector: %s", detector->alias);
+               "Unable to lock the detector: %s:%d", module->alias, modChan);
         return status;
     }
 
     *((double*) value) = fDetector->stats[FALCONXN_STATS_OUTPUT_COUNT_RATE];
 
-    status = psl__DetectorUnlock(detector);
+    status = psl__DetectorUnlock(fDetector);
     if (status != XIA_SUCCESS) {
         pslLog(PSL_LOG_ERROR, status,
-               "Unable to unlock the detector: %s", detector->alias);
+               "Unable to unlock the detector: %s:%d", module->alias, modChan);
     }
 
     return status;
 }
 
 PSL_STATIC int psl__mm0_run_active(int detChan,
-                                   Detector* detector, Module* module,
+                                   int modChan, Module* module,
                                    const char *name, void *value)
 {
     int status = XIA_SUCCESS;
-    FalconXNDetector* fDetector = detector->pslData;
+    FalconXNDetector* fDetector = psl__FindDetector(module, modChan);
 
     UNUSED(detChan);
     UNUSED(name);
     UNUSED(module);
 
-    status = psl__DetectorLock(detector);
+    status = psl__DetectorLock(fDetector);
     if (status != XIA_SUCCESS) {
         pslLog(PSL_LOG_ERROR, status,
-               "Unable to lock the detector: %s", detector->alias);
+               "Unable to lock the detector: %s:%d", module->alias, modChan);
         return status;
     }
 
@@ -4414,17 +4566,17 @@ PSL_STATIC int psl__mm0_run_active(int detChan,
     else
         *((unsigned long*) value) = 0;
 
-    status = psl__DetectorUnlock(detector);
+    status = psl__DetectorUnlock(fDetector);
     if (status != XIA_SUCCESS) {
         pslLog(PSL_LOG_ERROR, status,
-               "Unable to unlock the detector: %s", detector->alias);
+               "Unable to unlock the detector: %s:%d", module->alias, modChan);
     }
 
     return status;
 }
 
 PSL_STATIC int psl__mm0_module_statistics_2(int detChan,
-                                            Detector* detector, Module* module,
+                                            int modChan, Module* module,
                                             const char *name, void *value)
 {
     double* stats     = value;
@@ -4432,32 +4584,25 @@ PSL_STATIC int psl__mm0_module_statistics_2(int detChan,
     int     status;
 
     UNUSED(detChan);
-    UNUSED(detector);
+    UNUSED(modChan);
     UNUSED(name);
 
     /* Read out all stats for the module per the module_statistics_2 spec. */
     for (channel = 0; channel < (int) module->number_of_channels; channel++) {
+        if (module->channels[channel] == DISABLED_CHANNEL) continue;
+
         int       i, j;
-        Detector* chanDetector;
+        FalconXNDetector* fDetector = psl__FindDetector(module, channel);
+        ASSERT(fDetector);
 
         i = channel * XIA_NUM_MODULE_STATISTICS;
         for (j = 0; j < XIA_NUM_MODULE_STATISTICS; ++j)
             stats[i + j] = 0;
 
-        chanDetector = psl__FindDetector(module, channel);
-        if (chanDetector == NULL) {
-            status = XIA_INVALID_DETCHAN;
-            pslLog(PSL_LOG_ERROR, status,
-                   "Cannot find channel detector %s:%d", module->alias, channel);
-            return status;
-        }
-
-        FalconXNDetector* fDetector = chanDetector->pslData;
-
-        status = psl__DetectorLock(chanDetector);
+        status = psl__DetectorLock(fDetector);
         if (status != XIA_SUCCESS) {
             pslLog(PSL_LOG_ERROR, status,
-                   "Unable to lock the detector: %s", chanDetector->alias);
+                   "Unable to lock the detector: %s:%d", module->alias, channel);
             return status;
         }
 
@@ -4471,10 +4616,10 @@ PSL_STATIC int psl__mm0_module_statistics_2(int detChan,
         /* 7 - reserved */
         /* 8 - reserved */
 
-        status = psl__DetectorUnlock(chanDetector);
+        status = psl__DetectorUnlock(fDetector);
         if (status != XIA_SUCCESS) {
             pslLog(PSL_LOG_ERROR, status,
-                   "Unable to unlock the detector: %s", chanDetector->alias);
+                   "Unable to unlock the detector: %s:%d", module->alias, channel);
         }
     }
 
@@ -4482,11 +4627,11 @@ PSL_STATIC int psl__mm0_module_statistics_2(int detChan,
 }
 
 PSL_STATIC int psl__mm0_module_mca(int detChan,
-                                   Detector* detector, Module* module,
+                                   int modChan, Module* module,
                                    const char *name, void *value)
 {
     UNUSED(detChan);
-    UNUSED(detector);
+    UNUSED(modChan);
     UNUSED(name);
     UNUSED(value);
     UNUSED(module);
@@ -4495,11 +4640,11 @@ PSL_STATIC int psl__mm0_module_mca(int detChan,
 }
 
 PSL_STATIC int psl__mm0_mca_events(int detChan,
-                                   Detector* detector, Module* module,
+                                   int modChan, Module* module,
                                    const char *name, void *value)
 {
     UNUSED(detChan);
-    UNUSED(detector);
+    UNUSED(modChan);
     UNUSED(name);
     UNUSED(value);
     UNUSED(module);
@@ -4508,7 +4653,7 @@ PSL_STATIC int psl__mm0_mca_events(int detChan,
 }
 
 PSL_STATIC int psl__mm0_total_output_events(int detChan,
-                                            Detector* detector, Module* module,
+                                            int modChan, Module* module,
                                             const char *name, void *value)
 {
     int status = XIA_SUCCESS;
@@ -4536,20 +4681,20 @@ PSL_STATIC int psl__mm0_total_output_events(int detChan,
 
     *((unsigned long*) value) = pulses;
 #else
-    UNUSED(detector);
+    UNUSED(modChan);
     UNUSED(value);
 #endif
     return status;
 }
 
 PSL_STATIC int psl__mm0_max_sca_length(int detChan,
-                                       Detector* detector, Module* module,
+                                       int modChan, Module* module,
                                        const char *name, void *value)
 {
     int status;
     int intval = 0;
 
-    UNUSED(detector);
+    UNUSED(modChan);
     UNUSED(name);
 
     status = psl__GetMaxNumberSca(detChan, module, &intval);
@@ -4581,20 +4726,20 @@ PSL_STATIC int psl__GetMaxNumberSca(int detChan, Module* module, int *value)
     return XIA_SUCCESS;
 }
 
-PSL_STATIC int psl__SetDigitalConf(int detChan, Detector* detector, Module* module)
+PSL_STATIC int psl__SetDigitalConf(int modChan, Module* module)
 {
     int status;
 
     SiToro__Sinc__KeyValue kv;
 
-    pslLog(PSL_LOG_INFO, "Set digital I/O pins configuration for channel %d",
-           detChan);
+    pslLog(PSL_LOG_INFO, "Set digital I/O pins configuration for channel %s:%d",
+           module->alias, modChan);
 
     si_toro__sinc__key_value__init(&kv);
     kv.key = (char*) "instrument.digital.config";
-    kv.optionval = (char*) "8in-24out";
+    falconXNSetSincKeyValue(&kv, "8in-24out");
 
-    status = psl__SetParam(module, detector, &kv);
+    status = psl__SetParam(module, modChan, &kv);
     if (status != XIA_SUCCESS) {
         pslLog(PSL_LOG_ERROR, status, "Unable to set instrument.digital.config");
         return status;
@@ -4605,10 +4750,10 @@ PSL_STATIC int psl__SetDigitalConf(int detChan, Detector* detector, Module* modu
 }
 
 PSL_STATIC int psl__mm0_sca_length(int detChan,
-                                   Detector* detector, Module* module,
+                                   int modChan, Module* module,
                                    const char *name, void *value)
 {
-    FalconXNDetector* fDetector = detector->pslData;
+    FalconXNDetector* fDetector = psl__FindDetector(module, modChan);
     acqValue number_of_scas = psl__GetAcqValue(fDetector, "number_of_scas");
 
     UNUSED(detChan);
@@ -4624,10 +4769,10 @@ PSL_STATIC int psl__mm0_sca_length(int detChan,
  * Emulate SCA readout by summing the MCA bins.
  */
 PSL_STATIC int psl__mm0_sca(int detChan,
-                            Detector* detector, Module* module,
+                            int modChan, Module* module,
                             const char *name, void *value)
 {
-    FalconXNDetector* fDetector = detector->pslData;
+    FalconXNDetector* fDetector = psl__FindDetector(module, modChan);
     acqValue number_of_scas = psl__GetAcqValue(fDetector, "number_of_scas");
     acqValue number_mca_channels = psl__GetAcqValue(fDetector,
                                                     "number_mca_channels");
@@ -4672,7 +4817,7 @@ PSL_STATIC int psl__mm0_sca(int detChan,
         return XIA_NOMEM;
     }
 
-    status = psl__mm0_mca(detChan, detector, module, "mca", mca);
+    status = psl__mm0_mca(detChan, modChan, module, "mca", mca);
     if (status != XIA_SUCCESS) {
         handel_md_free(mca);
         pslLog(PSL_LOG_ERROR, status,
@@ -4710,22 +4855,22 @@ PSL_STATIC int psl__mm0_sca(int detChan,
  * MCA mapping mca_length. The run data member is documented on the mm0 routine.
  */
 PSL_STATIC int psl__mm1_mca_length(int detChan,
-                                   Detector* detector, Module* module,
+                                   int modChan, Module* module,
                                    const char *name, void *value)
 {
     /* Same as mm0. */
-    return psl__mm0_mca_length(detChan, detector, module, name, value);
+    return psl__mm0_mca_length(detChan, modChan, module, name, value);
 }
 
 /*
  * MCA mapping run_active. The run data member is documented on the mm0 routine.
  */
 PSL_STATIC int psl__mm1_run_active(int detChan,
-                                   Detector* detector, Module* module,
+                                   int modChan, Module* module,
                                    const char *name, void *value)
 {
     int status = XIA_SUCCESS;
-    FalconXNDetector* fDetector = detector->pslData;
+    FalconXNDetector* fDetector = psl__FindDetector(module, modChan);
 
     UNUSED(detChan);
     UNUSED(name);
@@ -4733,10 +4878,10 @@ PSL_STATIC int psl__mm1_run_active(int detChan,
 
     *((unsigned long*) value) = 0;
 
-    status = psl__DetectorLock(detector);
+    status = psl__DetectorLock(fDetector);
     if (status != XIA_SUCCESS) {
         pslLog(PSL_LOG_ERROR, status,
-               "Unable to lock the detector: %s", detector->alias);
+               "Unable to lock the detector: %s:%d", module->alias, modChan);
         return status;
     }
 
@@ -4756,7 +4901,7 @@ PSL_STATIC int psl__mm1_run_active(int detChan,
          */
         if (psl__MappingModeBuffers_PixelsReceived(mmb)) {
             pslLog(PSL_LOG_INFO,
-                   "Pixel count reached: %s", detector->alias);
+                   "Pixel count reached: %s:%d", module->alias, modChan);
         }
         else {
             *((unsigned long*) value) = 1;
@@ -4766,17 +4911,17 @@ PSL_STATIC int psl__mm1_run_active(int detChan,
     pslLog(PSL_LOG_INFO, "Active state %d: %s",
            detChan, *((int*) value) ? "ACTIVE" : "ready");
 
-    status = psl__DetectorUnlock(detector);
+    status = psl__DetectorUnlock(fDetector);
     if (status != XIA_SUCCESS) {
         pslLog(PSL_LOG_ERROR, status,
-               "Unable to unlock the detector: %s", detector->alias);
+               "Unable to unlock the detector: %s:%d", module->alias, modChan);
     }
 
     return status;
 }
 
 PSL_STATIC int psl__mm1_buffer_full_a(int detChan,
-                                      Detector* detector, Module* module,
+                                      int modChan, Module* module,
                                       const char *name, void *value)
 {
     int status = XIA_SUCCESS;
@@ -4786,14 +4931,14 @@ PSL_STATIC int psl__mm1_buffer_full_a(int detChan,
     UNUSED(module);
     UNUSED(name);
 
-    FalconXNDetector* fDetector = detector->pslData;
+    FalconXNDetector* fDetector = psl__FindDetector(module, modChan);
 
     *((int*) value) = 0;
 
-    status = psl__DetectorLock(detector);
+    status = psl__DetectorLock(fDetector);
     if (status != XIA_SUCCESS) {
         pslLog(PSL_LOG_ERROR, status,
-               "Unable to lock the detector: %s", detector->alias);
+               "Unable to lock the detector: %s:%d", module->alias, modChan);
         return status;
     }
 
@@ -4804,13 +4949,13 @@ PSL_STATIC int psl__mm1_buffer_full_a(int detChan,
     } else {
         status = XIA_NOT_ACTIVE;
         pslLog(PSL_LOG_ERROR, status,
-               "Not running or not MM1 mode: %s", detector->alias);
+               "Not running or not MM1 mode: %s:%d", module->alias, modChan);
     }
 
-    sstatus = psl__DetectorUnlock(detector);
+    sstatus = psl__DetectorUnlock(fDetector);
     if (sstatus != XIA_SUCCESS) {
         pslLog(PSL_LOG_ERROR, sstatus,
-               "Unable to unlock the detector: %s", detector->alias);
+               "Unable to unlock the detector: %s:%d", module->alias, modChan);
         if (status == XIA_SUCCESS)
             status = sstatus;
     }
@@ -4819,7 +4964,7 @@ PSL_STATIC int psl__mm1_buffer_full_a(int detChan,
 }
 
 PSL_STATIC int psl__mm1_buffer_full_b(int detChan,
-                                      Detector* detector, Module* module,
+                                      int modChan, Module* module,
                                       const char *name, void *value)
 {
     int status = XIA_SUCCESS;
@@ -4829,14 +4974,14 @@ PSL_STATIC int psl__mm1_buffer_full_b(int detChan,
     UNUSED(module);
     UNUSED(name);
 
-    FalconXNDetector* fDetector = detector->pslData;
+    FalconXNDetector* fDetector = psl__FindDetector(module, modChan);
 
     *((int*) value) = 0;
 
-    status = psl__DetectorLock(detector);
+    status = psl__DetectorLock(fDetector);
     if (status != XIA_SUCCESS) {
         pslLog(PSL_LOG_ERROR, status,
-               "Unable to lock the detector: %s", detector->alias);
+               "Unable to lock the detector: %s:%d", module->alias, modChan);
         return status;
     }
 
@@ -4847,13 +4992,13 @@ PSL_STATIC int psl__mm1_buffer_full_b(int detChan,
     } else {
         status = XIA_NOT_ACTIVE;
         pslLog(PSL_LOG_ERROR, status,
-               "Not running or not MM1 mode: %s", detector->alias);
+               "Not running or not MM1 mode: %s:%d", module->alias, modChan);
     }
 
-    sstatus = psl__DetectorUnlock(detector);
+    sstatus = psl__DetectorUnlock(fDetector);
     if (sstatus != XIA_SUCCESS) {
         pslLog(PSL_LOG_ERROR, sstatus,
-               "Unable to unlock the detector: %s", detector->alias);
+               "Unable to unlock the detector: %s:%d", module->alias, modChan);
         if (status == XIA_SUCCESS)
             status = sstatus;
     }
@@ -4862,12 +5007,12 @@ PSL_STATIC int psl__mm1_buffer_full_b(int detChan,
 }
 
 PSL_STATIC int psl__mm1_buffer_len(int detChan,
-                                   Detector* detector, Module* module,
+                                   int modChan, Module* module,
                                    const char *name, void *value)
 {
     int status = XIA_SUCCESS;
 
-    FalconXNDetector* fDetector = detector->pslData;
+    FalconXNDetector* fDetector = psl__FindDetector(module, modChan);
 
     acqValue number_mca_channels;
     acqValue num_map_pixels_per_buffer;
@@ -4878,10 +5023,10 @@ PSL_STATIC int psl__mm1_buffer_len(int detChan,
 
     *((int*) value) = 0;
 
-    status = psl__DetectorLock(detector);
+    status = psl__DetectorLock(fDetector);
     if (status != XIA_SUCCESS) {
         pslLog(PSL_LOG_ERROR, status,
-               "Unable to lock the detector: %s", detector->alias);
+               "Unable to lock the detector: %s:%d", module->alias, modChan);
         return status;
     }
 
@@ -4895,36 +5040,37 @@ PSL_STATIC int psl__mm1_buffer_len(int detChan,
                                                                 (uint16_t)number_mca_channels.ref.i,
                                                                 num_map_pixels_per_buffer.ref.i);
 
-    status = psl__DetectorUnlock(detector);
+    status = psl__DetectorUnlock(fDetector);
     if (status != XIA_SUCCESS) {
         pslLog(PSL_LOG_ERROR, status,
-               "Unable to unlock the detector: %s", detector->alias);
+               "Unable to unlock the detector: %s:%d", module->alias, modChan);
     }
 
     return status;
 }
 
 PSL_STATIC int psl__mm1_buffer_done(int detChan,
-                                    Detector* detector, Module* module,
+                                    int modChan, Module* module,
                                     const char *name, void *value)
 {
     int status = XIA_SUCCESS;
     int sstatus;
 
-    FalconXNDetector* fDetector = detector->pslData;
+    FalconXNDetector* fDetector = psl__FindDetector(module, modChan);
 
     UNUSED(detChan);
     UNUSED(module);
     UNUSED(name);
 
-    status = psl__DetectorLock(detector);
+    status = psl__DetectorLock(fDetector);
     if (status != XIA_SUCCESS) {
         pslLog(PSL_LOG_ERROR, status,
-               "Unable to lock the detector: %s", detector->alias);
+               "Unable to lock the detector: %s:%d", module->alias, modChan);
         return status;
     }
 
-    if ((fDetector->channelState == ChannelHistogram) &&
+    if ((fDetector->channelState == ChannelHistogram ||
+         fDetector->channelState == ChannelReady) &&
         psl__MappingModeControl_IsMode(&fDetector->mmc, MAPPING_MODE_MCA_FSM)) {
         MMC1_Data*  mm1 = psl__MappingModeControl_MM1Data(&fDetector->mmc);
         MM_Buffers* mmb = &mm1->buffers;
@@ -4945,10 +5091,10 @@ PSL_STATIC int psl__mm1_buffer_done(int detChan,
         if (buffer != active) {
             status = XIA_NOT_ACTIVE;
             pslLog(PSL_LOG_ERROR, status,
-                   "Buffer %c is not active, cannot signal done on it: %s",
-                   buffer, detector->alias);
+                   "Buffer %c is not active, cannot signal done on it: %s:%d",
+                   buffer, module->alias, modChan);
         } else {
-            psl__MappingModeBuffers_Active_SetDone(mmb);
+            psl__MappingModeBuffers_Active_Clear(mmb);
         }
 
         /*
@@ -4957,18 +5103,18 @@ PSL_STATIC int psl__mm1_buffer_done(int detChan,
         swapped = psl__MappingModeBuffers_Update(mmb);
         if (swapped) {
             pslLog(PSL_LOG_INFO,
-                   "A/B buffers swapped: %s", detector->alias);
+                   "A/B buffers swapped: %s:%d", module->alias, modChan);
         }
     } else {
         status = XIA_NOT_ACTIVE;
         pslLog(PSL_LOG_ERROR, status,
-               "Not running or not MM1 mode: %s", detector->alias);
+               "Not running or not MM1 mode: %s:%d", module->alias, modChan);
     }
 
-    sstatus = psl__DetectorUnlock(detector);
+    sstatus = psl__DetectorUnlock(fDetector);
     if (sstatus != XIA_SUCCESS) {
         pslLog(PSL_LOG_ERROR, sstatus,
-               "Unable to unlock the detector: %s", detector->alias);
+               "Unable to unlock the detector: %s:%d", module->alias, modChan);
         if (status == XIA_SUCCESS)
             status = sstatus;
     }
@@ -4977,22 +5123,22 @@ PSL_STATIC int psl__mm1_buffer_done(int detChan,
 }
 
 PSL_STATIC int psl__mm1_buffer_a(int detChan,
-                                 Detector* detector, Module* module,
+                                 int modChan, Module* module,
                                  const char *name, void *value)
 {
     int status = XIA_SUCCESS;
     int sstatus;
 
-    FalconXNDetector* fDetector = detector->pslData;
+    FalconXNDetector* fDetector = psl__FindDetector(module, modChan);
 
     UNUSED(detChan);
     UNUSED(module);
     UNUSED(name);
 
-    status = psl__DetectorLock(detector);
+    status = psl__DetectorLock(fDetector);
     if (status != XIA_SUCCESS) {
         pslLog(PSL_LOG_ERROR, status,
-               "Unable to lock the detector: %s", detector->alias);
+               "Unable to lock the detector: %s:%d", module->alias, modChan);
         return status;
     }
 
@@ -5005,24 +5151,24 @@ PSL_STATIC int psl__mm1_buffer_a(int detChan,
             status = psl__MappingModeBuffers_CopyOut(mmb, value, &size);
             if (status != XIA_SUCCESS) {
                 pslLog(PSL_LOG_ERROR, status,
-                       "Error coping buffer A data: %s", detector->alias);
+                       "Error coping buffer A data: %s:%d", module->alias, modChan);
             }
         } else {
             status = XIA_NOT_ACTIVE;
             pslLog(PSL_LOG_ERROR, status,
-                   "Buffer A is not active, cannot get copy: %s",
-                   detector->alias);
+                   "Buffer A is not active, cannot get copy: %s:%d",
+                   module->alias, modChan);
         }
     } else {
         status = XIA_NOT_ACTIVE;
         pslLog(PSL_LOG_ERROR, status,
-               "Not running or not MM1 mode: %s", detector->alias);
+               "Not running or not MM1 mode: %s:%d", module->alias, modChan);
     }
 
-    sstatus = psl__DetectorUnlock(detector);
+    sstatus = psl__DetectorUnlock(fDetector);
     if (sstatus != XIA_SUCCESS) {
         pslLog(PSL_LOG_ERROR, sstatus,
-               "Unable to unlock the detector: %s", detector->alias);
+               "Unable to unlock the detector: %s:%d", module->alias, modChan);
         if (status == XIA_SUCCESS)
             status = sstatus;
     }
@@ -5031,22 +5177,22 @@ PSL_STATIC int psl__mm1_buffer_a(int detChan,
 }
 
 PSL_STATIC int psl__mm1_buffer_b(int detChan,
-                                 Detector* detector, Module* module,
+                                 int modChan, Module* module,
                                  const char *name, void *value)
 {
     int status = XIA_SUCCESS;
     int sstatus;
 
-    FalconXNDetector* fDetector = detector->pslData;
+    FalconXNDetector* fDetector = psl__FindDetector(module, modChan);
 
     UNUSED(detChan);
     UNUSED(module);
     UNUSED(name);
 
-    status = psl__DetectorLock(detector);
+    status = psl__DetectorLock(fDetector);
     if (status != XIA_SUCCESS) {
         pslLog(PSL_LOG_ERROR, status,
-               "Unable to lock the detector: %s", detector->alias);
+               "Unable to lock the detector: %s:%d", module->alias, modChan);
         return status;
     }
 
@@ -5059,24 +5205,24 @@ PSL_STATIC int psl__mm1_buffer_b(int detChan,
             status = psl__MappingModeBuffers_CopyOut(mmb, value, &size);
             if (status != XIA_SUCCESS) {
                 pslLog(PSL_LOG_ERROR, status,
-                       "Error coping buffer B data: %s", detector->alias);
+                       "Error coping buffer B data: %s:%d", module->alias, modChan);
             }
         } else {
             status = XIA_NOT_ACTIVE;
             pslLog(PSL_LOG_ERROR, status,
-                   "Buffer B is not active, cannot get copy: %s",
-                   detector->alias);
+                   "Buffer B is not active, cannot get copy: %s:%d",
+                   module->alias, modChan);
         }
     } else {
         status = XIA_NOT_ACTIVE;
         pslLog(PSL_LOG_ERROR, status,
-               "Not running or not MM1 mode: %s", detector->alias);
+               "Not running or not MM1 mode: %s:%d", module->alias, modChan);
     }
 
-    sstatus = psl__DetectorUnlock(detector);
+    sstatus = psl__DetectorUnlock(fDetector);
     if (sstatus != XIA_SUCCESS) {
         pslLog(PSL_LOG_ERROR, sstatus,
-               "Unable to unlock the detector: %s", detector->alias);
+               "Unable to unlock the detector: %s:%d", module->alias, modChan);
         if (status == XIA_SUCCESS)
             status = sstatus;
     }
@@ -5085,22 +5231,22 @@ PSL_STATIC int psl__mm1_buffer_b(int detChan,
 }
 
 PSL_STATIC int psl__mm1_current_pixel(int detChan,
-                                      Detector* detector, Module* module,
+                                      int modChan, Module* module,
                                       const char *name, void *value)
 {
     int status = XIA_SUCCESS;
     int sstatus;
 
-    FalconXNDetector* fDetector = detector->pslData;
+    FalconXNDetector* fDetector = psl__FindDetector(module, modChan);
 
     UNUSED(detChan);
     UNUSED(module);
     UNUSED(name);
 
-    status = psl__DetectorLock(detector);
+    status = psl__DetectorLock(fDetector);
     if (status != XIA_SUCCESS) {
         pslLog(PSL_LOG_ERROR, status,
-               "Unable to lock the detector: %s", detector->alias);
+               "Unable to lock the detector: %s:%d", module->alias, modChan);
         return status;
     }
 
@@ -5112,13 +5258,13 @@ PSL_STATIC int psl__mm1_current_pixel(int detChan,
     } else {
         status = XIA_NOT_ACTIVE;
         pslLog(PSL_LOG_ERROR, status,
-               "Not running or not MM1 mode: %s", detector->alias);
+               "Not running or not MM1 mode: %s:%d", module->alias, modChan);
     }
 
-    sstatus = psl__DetectorUnlock(detector);
+    sstatus = psl__DetectorUnlock(fDetector);
     if (sstatus != XIA_SUCCESS) {
         pslLog(PSL_LOG_ERROR, sstatus,
-               "Unable to unlock the detector: %s", detector->alias);
+               "Unable to unlock the detector: %s:%d", module->alias, modChan);
         if (status == XIA_SUCCESS)
             status = sstatus;
     }
@@ -5127,22 +5273,22 @@ PSL_STATIC int psl__mm1_current_pixel(int detChan,
 }
 
 PSL_STATIC int psl__mm1_buffer_overrun(int detChan,
-                                       Detector* detector, Module* module,
+                                       int modChan, Module* module,
                                        const char *name, void *value)
 {
     int status = XIA_SUCCESS;
     int sstatus;
 
-    FalconXNDetector* fDetector = detector->pslData;
+    FalconXNDetector* fDetector = psl__FindDetector(module, modChan);
 
     UNUSED(detChan);
     UNUSED(module);
     UNUSED(name);
 
-    status = psl__DetectorLock(detector);
+    status = psl__DetectorLock(fDetector);
     if (status != XIA_SUCCESS) {
         pslLog(PSL_LOG_ERROR, status,
-               "Unable to lock the detector: %s", detector->alias);
+               "Unable to lock the detector: %s:%d", module->alias, modChan);
         return status;
     }
 
@@ -5154,7 +5300,7 @@ PSL_STATIC int psl__mm1_buffer_overrun(int detChan,
 
         if (overruns) {
             pslLog(PSL_LOG_INFO,
-                   "Overrun count %d: %s", (int) overruns, detector->alias);
+                   "Overrun count %d: %s:%d", (int) overruns, module->alias, modChan);
             *((int*) value) = 1;
         } else {
             *((int*) value) = 0;
@@ -5162,13 +5308,13 @@ PSL_STATIC int psl__mm1_buffer_overrun(int detChan,
     } else {
         status = XIA_NOT_ACTIVE;
         pslLog(PSL_LOG_ERROR, status,
-               "Not running or not MM1 mode: %s", detector->alias);
+               "Not running or not MM1 mode: %s:%d", module->alias, modChan);
     }
 
-    sstatus = psl__DetectorUnlock(detector);
+    sstatus = psl__DetectorUnlock(fDetector);
     if (sstatus != XIA_SUCCESS) {
         pslLog(PSL_LOG_ERROR, sstatus,
-               "Unable to unlock the detector: %s", detector->alias);
+               "Unable to unlock the detector: %s:%d", module->alias, modChan);
         if (status == XIA_SUCCESS)
             status = sstatus;
     }
@@ -5177,31 +5323,31 @@ PSL_STATIC int psl__mm1_buffer_overrun(int detChan,
 }
 
 PSL_STATIC int psl__mm1_module_statistics_2(int detChan,
-                                            Detector* detector, Module* module,
+                                            int modChan, Module* module,
                                             const char *name, void *value)
 {
     /* same as MM0 for now */
-    return psl__mm0_module_statistics_2(detChan, detector, module, name, value);
+    return psl__mm0_module_statistics_2(detChan, modChan, module, name, value);
 }
 
 PSL_STATIC int psl__mm1_mapping_pixel_next(int detChan,
-                                           Detector* detector, Module* module,
+                                           int modChan, Module* module,
                                            const char *name, void *value)
 {
     int status = XIA_SUCCESS;
     int sstatus;
 
-    FalconXNDetector* fDetector = detector->pslData;
+    FalconXNDetector* fDetector = psl__FindDetector(module, modChan);
 
     UNUSED(detChan);
     UNUSED(module);
     UNUSED(name);
     UNUSED(value);
 
-    status = psl__DetectorLock(detector);
+    status = psl__DetectorLock(fDetector);
     if (status != XIA_SUCCESS) {
         pslLog(PSL_LOG_ERROR, status,
-               "Unable to lock the detector: %s", detector->alias);
+               "Unable to lock the detector: %s:%d", module->alias, modChan);
         return status;
     }
 
@@ -5215,13 +5361,13 @@ PSL_STATIC int psl__mm1_mapping_pixel_next(int detChan,
     } else {
         status = XIA_NOT_ACTIVE;
         pslLog(PSL_LOG_ERROR, status,
-               "Not running or not MM1 mode: %s", detector->alias);
+               "Not running or not MM1 mode: %s:%d", module->alias, modChan);
     }
 
-    sstatus = psl__DetectorUnlock(detector);
+    sstatus = psl__DetectorUnlock(fDetector);
     if (sstatus != XIA_SUCCESS) {
         pslLog(PSL_LOG_ERROR, sstatus,
-               "Unable to unlock the detector: %s", detector->alias);
+               "Unable to unlock the detector: %s:%d", module->alias, modChan);
         if (status == XIA_SUCCESS)
             status = sstatus;
     }
@@ -5267,7 +5413,7 @@ PSL_STATIC const char* getRunDataLabels[] =
 
 #define GET_RUN_DATA_HANDLER_COUNT (sizeof(getRunDataLabels) / sizeof(const char*))
 
-PSL_STATIC DoBoardOperation_FP getRunDataHandlers[MAPPING_MODE_COUNT][GET_RUN_DATA_HANDLER_COUNT] =
+PSL_STATIC DoRunData_FP getRunDataHandlers[MAPPING_MODE_COUNT][GET_RUN_DATA_HANDLER_COUNT] =
     {
         {
             psl__mm0_mca_length,
@@ -5366,7 +5512,7 @@ PSL_STATIC int psl__GetRunData(int detChan, const char *name, void *value,
 {
     int status = XIA_SUCCESS;
 
-    FalconXNDetector* fDetector = detector->pslData;
+    FalconXNDetector* fDetector;
 
     UNUSED(defs);
 
@@ -5374,7 +5520,9 @@ PSL_STATIC int psl__GetRunData(int detChan, const char *name, void *value,
 
     int h;
 
-    xiaPSLBadArgs(module, detector, "psl__GetRunData");
+    xiaPSLBadArgs(detChan, module, detector);
+
+    fDetector = psl__FindDetector(module, xiaGetModChan(detChan));
 
     mapping_mode = psl__GetAcqValue(fDetector, "mapping_mode");
 
@@ -5391,10 +5539,10 @@ PSL_STATIC int psl__GetRunData(int detChan, const char *name, void *value,
 
     for (h = 0; h < (int) GET_RUN_DATA_HANDLER_COUNT; ++h) {
         if (STREQ(name, getRunDataLabels[h])) {
-            DoBoardOperation_FP handler;
+            DoRunData_FP handler;
             handler = getRunDataHandlers[mapping_mode.ref.i][h];
             if (handler) {
-                return handler(detChan, detector, module,
+                return handler(detChan, xiaGetModChan(detChan), module,
                                name, value);
             }
             break;
@@ -5416,7 +5564,7 @@ PSL_STATIC int psl__CheckDetCharWaveform(const char* name, SincCalibrationPlot* 
     for (i = 0; i < wave->len; ++i) {
         if (wave->x[i] != i) {
             status = XIA_FORMAT_ERROR;
-            xiaLog(XIA_LOG_ERROR, status, "psl__CheckDetCharWaveform",
+            pslLog(PSL_LOG_ERROR, status,
                    "%s X waveform data out of range: %d = %f", name, i, wave->x[i]);
             return status;
         }
@@ -5425,7 +5573,7 @@ PSL_STATIC int psl__CheckDetCharWaveform(const char* name, SincCalibrationPlot* 
     for (i = 0; i < wave->len; ++i) {
         if ((wave->y[i] < -100) || (wave->y[i] > 100)) {
             status = XIA_FORMAT_ERROR;
-            xiaLog(XIA_LOG_ERROR, status, "psl__CheckDetCharWaveform",
+            pslLog(PSL_LOG_ERROR, status,
                    "%s Y waveform data out of range: %d = %f", name, i, wave->y[i]);
             return status;
         }
@@ -5440,11 +5588,13 @@ PSL_STATIC int psl__SpecialRun(int detChan, const char *name, void *info,
 {
     int status = XIA_SUCCESS;
 
-    FalconXNDetector* fDetector = detector->pslData;
+    FalconXNDetector* fDetector;
 
     UNUSED(defaults);
 
-    xiaPSLBadArgs(module, detector, "psl__SpecialRun");
+    xiaPSLBadArgs(detChan, module, detector);
+
+    fDetector = psl__FindDetector(module, xiaGetModChan(detChan));
 
     pslLog(PSL_LOG_DEBUG,
            "%s (%d/%d): %s",
@@ -5457,17 +5607,17 @@ PSL_STATIC int psl__SpecialRun(int detChan, const char *name, void *info,
                    *value, 0x2000);
             *value = 0x2000;
         }
-        status = psl__SetADCTraceLength(module, detector, (int64_t)*value);
+        status = psl__SetADCTraceLength(module, fDetector->modDetChan, (int64_t)*value);
     }
     else if (STREQ(name, "detc-start")) {
-        status = psl__DetCharacterizeStart(detChan, detector, module);
+        status = psl__DetCharacterizeStart(detChan, fDetector, module);
         if (status != XIA_SUCCESS) {
             pslLog(PSL_LOG_ERROR, status,
                    "Start characterization special run failed");
             return status;
         }
 
-        status = psl__DetectorLock(detector);
+        status = psl__DetectorLock(fDetector);
         if (status != XIA_SUCCESS) {
             pslLog(PSL_LOG_ERROR, status,
                    "Unable to lock the detector: %s", detector->alias);
@@ -5484,7 +5634,7 @@ PSL_STATIC int psl__SpecialRun(int detChan, const char *name, void *info,
         falconXNClearDetectorCalibrationData(fDetector);
         strcpy(fDetector->calibStage, "Starting");
 
-        status = psl__DetectorUnlock(detector);
+        status = psl__DetectorUnlock(fDetector);
         if (status != XIA_SUCCESS) {
             pslLog(PSL_LOG_ERROR, status,
                    "Unable to unlock the detector: %s", detector->alias);
@@ -5520,17 +5670,19 @@ PSL_STATIC int psl__GetSpecialRunData(int detChan, const char *name, void *value
 {
     int status = XIA_SUCCESS;
 
-    FalconXNDetector* fDetector = detector->pslData;
+    FalconXNDetector* fDetector;
 
     UNUSED(defaults);
 
-    xiaPSLBadArgs(module, detector, "psl__GetSpecialRunData");
+    xiaPSLBadArgs(detChan, module, detector);
 
     pslLog(PSL_LOG_DEBUG,
            "Detector %s (%d): %s", detector->alias, detChan, name);
 
+    fDetector = psl__FindDetector(module, xiaGetModChan(detChan));
+
     if (STREQ(name, "adc_trace")) {
-        status = psl__GetADCTrace(module, detector, value);
+        status = psl__GetADCTrace(module, fDetector, value);
         if (status != XIA_SUCCESS) {
             pslLog(PSL_LOG_ERROR, status,
                    "Unable to get ADC trace data");
@@ -5539,7 +5691,7 @@ PSL_STATIC int psl__GetSpecialRunData(int detChan, const char *name, void *value
     }
     else if (STREQ(name, "adc_trace_length")) {
         int64_t length;
-        status = psl__GetADCTraceLength(module, detector, &length);
+        status = psl__GetADCTraceLength(module, fDetector->modDetChan, &length);
         if (status != XIA_SUCCESS) {
             pslLog(PSL_LOG_ERROR, status,
                    "Unable to get ADC trace length");
@@ -5548,7 +5700,7 @@ PSL_STATIC int psl__GetSpecialRunData(int detChan, const char *name, void *value
         return status;
     }
 
-    status = psl__DetectorLock(detector);
+    status = psl__DetectorLock(fDetector);
     if (status != XIA_SUCCESS)
         return status;
 
@@ -5558,40 +5710,14 @@ PSL_STATIC int psl__GetSpecialRunData(int detChan, const char *name, void *value
         *((int*) value) = sizeof(fDetector->calibStage);
     }
     else if (STREQ(name, "detc-running")) {
-        pslLog(PSL_LOG_INFO,
-               "Running: %s",
-               fDetector->channelState == ChannelCharacterizing ? "yes" : "no");
-        *((int*) value) = fDetector->channelState == ChannelCharacterizing ? 1 : 0;
+        int *running = (int*) value;
+        *running = fDetector->channelState == ChannelCharacterizing ? 1 : 0;
+        pslLog(PSL_LOG_INFO, "Running: %s", *running ? "yes" : "no");
     }
     else if (STREQ(name, "detc-successful")) {
-        /*
-         * This is never returned in the protocol so just assume it is ok
-         * until it is fixed.
-         *
-         * HACK: additionally, getting detc-successful is the only place we refresh
-         * the calibration data after the process completes, so this has to be called
-         * before retrieving the pulses. case 12292
-         */
         int *success = (int*) value;
-
-        pslLog(PSL_LOG_INFO,
-               "Successful: %s",
-               fDetector->channelState == ChannelCharacterizing ? "no" : "yes");
-        *success = fDetector->channelState == ChannelCharacterizing ? 0 : 1;
-
-        status = psl__DetectorUnlock(detector);
-
-        if (status == XIA_SUCCESS) {
-            if (*success) {
-                status = psl__GetCalibration(module, detector);
-                if (status != XIA_SUCCESS) {
-                    pslLog(PSL_LOG_ERROR, status,
-                           "Cannot get calibration data");
-                }
-            }
-        }
-
-        return status;
+        *success = psl__GetCalibrated(module, fDetector) ? 1 : 0;
+        pslLog(PSL_LOG_INFO, "Successful: %s", *success ? "yes" : "no");
     }
     else if (STREQ(name, "detc-percentage")) {
         pslLog(PSL_LOG_INFO,
@@ -5600,8 +5726,7 @@ PSL_STATIC int psl__GetSpecialRunData(int detChan, const char *name, void *value
         *((int*) value) = (int) fDetector->calibPercentage;
     }
     else if (STREQ(name, "detc-progress-text")) {
-        pslLog(PSL_LOG_INFO,
-               "Stage: %s", fDetector->calibStage);
+        pslLog(PSL_LOG_INFO, "Stage: %s", fDetector->calibStage);
         strncpy(value, fDetector->calibStage, sizeof(fDetector->calibStage) - 1);
     }
     else if (STREQ(name, "detc-string-size")) {
@@ -5657,9 +5782,97 @@ PSL_STATIC int psl__GetSpecialRunData(int detChan, const char *name, void *value
                "Invalid name: %s", name);
     }
 
-    status = psl__DetectorUnlock(detector);
+    status = psl__DetectorUnlock(fDetector);
 
     return status;
+}
+
+PSL_STATIC int psl__LoadChanData(const int modChan, Module *module)
+{
+    FalconXNDetector* fDetector;
+
+    GenBuffer buf = module->ch[modChan].data;
+
+    int status;
+
+    fDetector = psl__FindDetector(module, modChan);
+    if (fDetector == NULL) {
+        status = XIA_INVALID_DETCHAN;
+        pslLog(PSL_LOG_ERROR, status,
+               "Cannot find channel %s:%d", module->alias, modChan);
+        return status;
+    }
+
+    if (buf.length < 1) {
+        pslLog(PSL_LOG_INFO, "No characterization data for channel %s:%d",
+                module->alias, modChan);
+        status = psl__DetectorLock(fDetector);
+        if (status != XIA_SUCCESS)
+            return status;
+        fDetector->calibrationState = CalibrationNone;
+        psl__DetectorUnlock(fDetector);
+    } else {
+        status = psl__LoadDetCharacterizationS(fDetector, module, (char*)buf.data);
+    }
+    return status;
+}
+
+PSL_STATIC int psl__SaveChanData(const int modChan, Module *module)
+{
+    FalconXNDetector* fDetector;
+
+    int status;
+
+    fDetector = psl__FindDetector(module, modChan);
+    if (fDetector == NULL) {
+        status = XIA_INVALID_DETCHAN;
+        pslLog(PSL_LOG_ERROR, status,
+               "Cannot find channel %s:%d", module->alias, modChan);
+        return status;
+    }
+
+    /* Unload the characterization to a string buffer. The binary data
+     * and three pulses worth of y-values typically take a little over
+     * 70K, so initialize a little over that.
+     */
+    xia_sio detChar;
+    status = xia_sio_open(&detChar, 80000);
+    if (status != XIA_SUCCESS) {
+        pslLog(PSL_LOG_ERROR, status,
+               "Opening buffer for detector characterization.");
+        return status;
+    }
+
+    status = psl__UnloadDetCharacterization(module, fDetector, &detChar);
+    if (status != XIA_SUCCESS) {
+        xia_sio_close(&detChar);
+        pslLog(PSL_LOG_ERROR, status,
+               "Unloading detector chararacterization to temp buffer.");
+        return status;
+    }
+
+    size_t size = xia_sio_level(&detChar);
+    char *detCharacterizationStr = handel_md_alloc(size * sizeof(char));
+    if (detCharacterizationStr == NULL) {
+        xia_sio_close(&detChar);
+        pslLog(PSL_LOG_ERROR, XIA_NOMEM,
+               "No memory when loading detector characterization string: %d",
+               (int) detChar.size);
+        return XIA_NOMEM;
+    }
+
+    xia_sio_copy_out(&detChar, detCharacterizationStr, size);
+
+    if (module->ch[modChan].data.data) {
+        handel_md_free(module->ch[modChan].data.data);
+    }
+
+    module->ch[modChan].data.data = detCharacterizationStr;
+    module->ch[modChan].data.length = detChar.level;
+
+    xia_sio_close(&detChar);
+
+    return XIA_SUCCESS;
 }
 
 PSL_STATIC int psl__IniWrite(FILE* fp, const char* section, const char* path,
@@ -5675,48 +5888,16 @@ PSL_STATIC int psl__IniWrite(FILE* fp, const char* section, const char* path,
         int modChan;
 
         for (modChan = 0; modChan < (int) module->number_of_channels; modChan++) {
-            Detector* chanDetector;
-            char item[MAXITEM_LEN];
-            char firmware[MAXITEM_LEN];
-            char filename[MAXITEM_LEN];
-
+            if (module->channels[modChan] == DISABLED_CHANNEL) continue;
             int status;
 
-            chanDetector = psl__FindDetector(module, modChan);
-            if (chanDetector == NULL) {
-                status = XIA_INVALID_DETCHAN;
-                pslLog(PSL_LOG_ERROR, status,
-                       "Cannot find channel %s:%d", module->alias, modChan);
-                return status;
-            }
-
-            /*
-             * Check a firmware set is present for this channel. It must exist
-             * before running a detector characterization.
-             */
-            sprintf(item, "firmware_set_chan%d", modChan);
-
-            status = xiaGetModuleItem(module->alias, item, firmware);
-
+            status = psl__SaveChanData(modChan, module);
             if (status != XIA_SUCCESS) {
                 pslLog(PSL_LOG_ERROR, status,
-                       "Error getting the firmware from the module: %s", item);
+                       "Error saving channel data for channel %s:%d",
+                       module->alias, modChan);
                 return status;
             }
-
-            status = xiaGetFirmwareItem(firmware, 0, "filename", filename);
-
-            if (status != XIA_SUCCESS) {
-                pslLog(PSL_LOG_ERROR, status,
-                       "Error getting the filename from the firmware set alias: %s",
-                       firmware);
-                return status;
-            }
-
-            /*
-             * Do not abort the INI write because it can become corrupted.
-             */
-            psl__UnloadDetCharacterization(module, chanDetector, filename);
         }
     }
 
@@ -5775,11 +5956,10 @@ PSL_STATIC int psl__ModuleTransactionReceive(Module* module, Sinc_Response* resp
         /*
          * The sender waits here for the response.
          */
-        status = handel_md_event_wait(&fModule->sendEvent, 0);
+        status = handel_md_event_wait(&fModule->sendEvent, FALCONXN_RESPONSE_TIMEOUT * 1000);
         if (status != 0) {
             int me = status;
-            status = XIA_THREAD_ERROR;
-            handel_md_mutex_unlock(&fModule->sendLock);
+            status = XIA_TIMEOUT;
             pslLog(PSL_LOG_ERROR, status,
                    "Module send event wait failed: %d", me);
             return status;
@@ -5856,14 +6036,14 @@ PSL_STATIC int psl__ModuleTransactionEnd(Module* module)
  * Get the Detector struct for a SINC channel within a module. The
  * SINC channel number is the same as the module channel.
  */
-PSL_STATIC Detector* psl__FindDetector(Module* module, int channel)
+PSL_STATIC FalconXNDetector* psl__FindDetector(Module* module, int channel)
 {
     ASSERT(channel < (int)module->number_of_channels);
 
     if (channel >= (int)module->number_of_channels)
         return NULL;
 
-    return xiaFindDetector(module->detector[channel]);
+    return module->ch[channel].pslData;
 }
 
 PSL_STATIC int psl__ModuleResponse(Module* module, int channel, int type, void* resp)
@@ -5945,7 +6125,9 @@ PSL_STATIC int psl__ModuleStatusResponse(Module* module, int mstatus)
     return XIA_SUCCESS;
 }
 
-PSL_STATIC int psl__ReceiveHistogram_MM0(Detector*                detector,
+PSL_STATIC int psl__ReceiveHistogram_MM0(Module*                  module,
+                                         FalconXNDetector*        fDetector,
+                                         int                      channel,
                                          MM_Control*              mmc,
                                          SincHistogram*           accepted,
                                          SincHistogram*           rejected,
@@ -5963,15 +6145,15 @@ PSL_STATIC int psl__ReceiveHistogram_MM0(Detector*                detector,
     if (accepted->len) {
         if (mm0->numMCAChannels != (uint32_t) accepted->len) {
             pslLog(PSL_LOG_ERROR, XIA_INVALID_VALUE,
-                   "Invalid accepted length (mca_channels=%d,accepted=%d): %s",
-                   mm0->numMCAChannels, accepted->len, detector->alias);
+                   "Invalid accepted length (mca_channels=%d,accepted=%d): %s:%d",
+                   mm0->numMCAChannels, accepted->len, module->alias, channel);
         } else {
             status = psl__MappingModeBuffers_CopyIn(&mm0->buffers,
                                                     accepted->data,
                                                     (size_t) accepted->len);
             if (status != XIA_SUCCESS) {
                 pslLog(PSL_LOG_ERROR, status,
-                       "Error coping in accepted data: %s", detector->alias);
+                       "Error copying in accepted data: %s:%d", module->alias, channel);
             }
         }
     }
@@ -5979,15 +6161,15 @@ PSL_STATIC int psl__ReceiveHistogram_MM0(Detector*                detector,
     if (rejected->len) {
         if (mm0->numMCAChannels != (uint32_t) rejected->len) {
             pslLog(PSL_LOG_ERROR, XIA_INVALID_VALUE,
-                   "Invalid rejected length (mca_channels=%d,rejected=%d): %s",
-                   mm0->numMCAChannels, rejected->len, detector->alias);
+                   "Invalid rejected length (mca_channels=%d,rejected=%d): %s:%d",
+                   mm0->numMCAChannels, rejected->len, module->alias, channel);
         } else {
             sstatus = psl__MappingModeBuffers_CopyIn(&mm0->buffers,
                                                      rejected->data,
                                                      (size_t) rejected->len);
             if (sstatus != XIA_SUCCESS) {
                 pslLog(PSL_LOG_ERROR, sstatus,
-                       "Error coping in rejected data: %s", detector->alias);
+                       "Error coping in rejected data: %s:%d", module->alias, channel);
             }
             if ((status == XIA_SUCCESS) && (sstatus != XIA_SUCCESS))
                 status = sstatus;
@@ -5996,16 +6178,21 @@ PSL_STATIC int psl__ReceiveHistogram_MM0(Detector*                detector,
 
     /*
      * Copy in the FalconXN stats we received. It is better to buffer 32bit
-     * values than doubles. We buffer with the histogram to make sure the
-     * stats and the histogram match.
+     * values than doubles. We buffer with the histogram incase there is a
+     * need for per histogram stats.
      */
     sstatus = psl__MappingModeBuffers_CopyIn(&mm0->buffers,
                                              stats,
                                              mm0->numStats);
     if (sstatus != XIA_SUCCESS) {
         pslLog(PSL_LOG_ERROR, sstatus,
-               "Error coping in stats: %s", detector->alias);
+               "Error coping in stats: %s:%d", module->alias, channel);
     }
+
+    /*
+     * Update the stats in real-time as they arrive. Users can poll for them.
+     */
+    falconXNSetDetectorStats(fDetector->stats, stats);
 
     if ((status == XIA_SUCCESS) && (sstatus != XIA_SUCCESS))
         status = sstatus;
@@ -6017,15 +6204,13 @@ PSL_STATIC int psl__ReceiveHistogram_MM0(Detector*                detector,
 }
 
 PSL_STATIC int psl__ReceiveHistogram_MM1(Module*                  module,
-                                         Detector*                detector,
+                                         FalconXNDetector*        fDetector,
                                          int                      channel,
                                          MM_Control*              mmc,
                                          SincHistogram*           accepted,
                                          SincHistogramCountStats* stats)
 {
     int status = XIA_SUCCESS;
-
-    FalconXNDetector* fDetector;
 
     MMC1_Data*  mm1;
     MM_Buffers* mmb;
@@ -6040,13 +6225,14 @@ PSL_STATIC int psl__ReceiveHistogram_MM1(Module*                  module,
     if (accepted->len == 0) {
         status = XIA_INVALID_VALUE;
         pslLog(PSL_LOG_ERROR, status,
-               "Accepted length is 0: %s", detector->alias);
+               "Accepted length is 0: %s:%d", module->alias, channel);
         return status;
     }
 
-    fDetector = detector->pslData;
-
-    falconXNSetDetectorStats(fDetector, stats);
+    /*
+     * Update the stats in real-time as they arrive. Users can poll for them.
+     */
+    falconXNSetDetectorStats(fDetector->stats, stats);
 
     mm1 = psl__MappingModeControl_MM1Data(mmc);
     mmb = &mm1->buffers;
@@ -6058,8 +6244,8 @@ PSL_STATIC int psl__ReceiveHistogram_MM1(Module*                  module,
     if (mm1->numMCAChannels != (uint32_t) accepted->len) {
         status = XIA_INVALID_VALUE;
         pslLog(PSL_LOG_ERROR, status,
-               "Accepted length is does not match MCA channels: %s",
-               detector->alias);
+               "Accepted length is does not match MCA channels: %s:%d",
+               module->alias, channel);
         return status;
     }
 
@@ -6068,7 +6254,7 @@ PSL_STATIC int psl__ReceiveHistogram_MM1(Module*                  module,
      */
     if (psl__MappingModeBuffers_PixelsReceived(mmb)) {
         pslLog(PSL_LOG_INFO,
-               "Pixel count reached: %s", detector->alias);
+               "Pixel count reached: %s:%d", module->alias, channel);
         return status;
     }
 
@@ -6077,21 +6263,10 @@ PSL_STATIC int psl__ReceiveHistogram_MM1(Module*                  module,
      */
     if (mm1->pixelAdvanceCounter == 0) {
         pslLog(PSL_LOG_DEBUG,
-               "Pixels=%d: %s. Waiting for user advance.",
+               "Pixels=%d: %s:%d. Waiting for user advance.",
                (int) psl__MappingModeBuffers_Next_PixelTotal(mmb),
-               detector->alias);
+               module->alias, channel);
         return XIA_SUCCESS;
-    }
-
-    /*
-     * Update before we write the pixel in case the user has just finished
-     * reading the Active buffer and so it is flagged as done. It might have
-     * not been done when the last pixel was written in.
-     */
-    swapped = psl__MappingModeBuffers_Update(mmb);
-    if (swapped) {
-        pslLog(PSL_LOG_INFO,
-               "A/B buffers swapped: %s", detector->alias);
     }
 
     /*
@@ -6102,18 +6277,19 @@ PSL_STATIC int psl__ReceiveHistogram_MM1(Module*                  module,
         psl__MappingModeBuffers_Overrun(mmb);
         status = XIA_INTERNAL_BUFFER_OVERRUN;
         pslLog(PSL_LOG_ERROR, status,
-               "Overfow, next buffer is full: %s", detector->alias);
+               "Overflow, next buffer is full: %s:%d", module->alias, channel);
         return status;
     }
 
     pslLog(PSL_LOG_DEBUG,
-           "Next:%c pixels=%d bufferPixel=%d level=%d size=%d: %s",
+           "Next:%c pixels=%d bufferPixel=%d level=%d size=%d: %s:%d",
            psl__MappingModeBuffers_Next_Label(mmb),
            (int) psl__MappingModeBuffers_Next_PixelTotal(mmb),
            (int) psl__MappingModeBuffers_Next_Pixels(mmb),
            (int) psl__MappingModeBuffers_Next_Level(mmb),
            (int) psl__MappingModeBuffers_Size(mmb),
-           detector->alias);
+           module->alias,
+           channel);
 
     /*
      * If the Next's level is 0 the buffer does not have an XMAP header. Add
@@ -6123,7 +6299,7 @@ PSL_STATIC int psl__ReceiveHistogram_MM1(Module*                  module,
         status = psl__XMAP_WriteBufferHeader_MM1(mm1);
         if (status != XIA_SUCCESS) {
             pslLog(PSL_LOG_ERROR, status,
-                   "Error adding an XMAP buffer header: %s", detector->alias);
+                   "Error adding an XMAP buffer header: %s:%d", module->alias, channel);
             return status;
         }
     }
@@ -6151,7 +6327,7 @@ PSL_STATIC int psl__ReceiveHistogram_MM1(Module*                  module,
     status = psl__XMAP_WritePixelHeader_MM1(mm1, &pstats);
     if (status != XIA_SUCCESS) {
         pslLog(PSL_LOG_ERROR, status,
-               "Error adding an XMAP pixel header: %s", detector->alias);
+               "Error adding an XMAP pixel header: %s:%d", module->alias, channel);
         return status;
     }
 
@@ -6162,23 +6338,22 @@ PSL_STATIC int psl__ReceiveHistogram_MM1(Module*                  module,
                                             (size_t) accepted->len);
     if (status != XIA_SUCCESS) {
         pslLog(PSL_LOG_ERROR, status,
-               "Error copying in accepted data: %s", detector->alias);
+               "Error copying in accepted data: %s:%d", module->alias, channel);
     }
 
     status = psl__XMAP_UpdateBufferHeader_MM1(mm1);
     if (status != XIA_SUCCESS) {
         pslLog(PSL_LOG_ERROR, status,
-               "Error updating buffer header: %s", detector->alias);
+               "Error updating buffer header: %s:%d", module->alias, channel);
     }
 
     /*
-     * Update again so the data any data is waiting for the user to read from
-     * the Active buffer.
+     * Update so any data is waiting for the user to read from the Active buffer.
      */
     swapped = psl__MappingModeBuffers_Update(mmb);
     if (swapped) {
         pslLog(PSL_LOG_INFO,
-               "A/B buffers swapped: %s", detector->alias);
+               "A/B buffers swapped: %s:%d", module->alias, channel);
     }
 
     /*
@@ -6189,7 +6364,7 @@ PSL_STATIC int psl__ReceiveHistogram_MM1(Module*                  module,
      */
     if (psl__MappingModeBuffers_PixelsReceived(mmb)) {
         pslLog(PSL_LOG_INFO,
-               "Pixel count reached: %s", detector->alias);
+               "Pixel count reached: %s:%d", module->alias, channel);
     }
 
     return status;
@@ -6200,8 +6375,6 @@ PSL_STATIC int psl__ReceiveHistogramData(Module* module, SincBuffer* packet)
     int status;
 
     FalconXNModule* fModule = module->pslData;
-
-    Detector* detector;
     FalconXNDetector* fDetector;
 
     int channel = -1;
@@ -6232,8 +6405,11 @@ PSL_STATIC int psl__ReceiveHistogramData(Module* module, SincBuffer* packet)
         return status;
     }
 
-    detector = psl__FindDetector(module, channel);
-    if (detector == NULL) {
+    /* If a previous process was aborted during a run, sometimes we get an extra
+     * histogram data response on startup.
+     */
+    fDetector = psl__FindDetector(module, channel);
+    if (fDetector == NULL) {
         free(accepted.data);
         free(rejected.data);
         status = XIA_INVALID_DETCHAN;
@@ -6243,7 +6419,7 @@ PSL_STATIC int psl__ReceiveHistogramData(Module* module, SincBuffer* packet)
     }
 
     pslLog(PSL_LOG_DEBUG,
-           "Histo Id:%" PRIu64 " elapsed=%0.3f accepted=%" PRIu64 " icr=%0.3f ocr=%0.3f deadtime=%0.3f gate=%d: %s",
+           "Histo Id:%" PRIu64 " elapsed=%0.3f accepted=%" PRIu64 " icr=%0.3f ocr=%0.3f deadtime=%0.3f gate=%d: %s:%d",
            stats.dataSetId,
            stats.timeElapsed,
            stats.pulsesAccepted,
@@ -6251,27 +6427,15 @@ PSL_STATIC int psl__ReceiveHistogramData(Module* module, SincBuffer* packet)
            stats.outputCountRate,
            stats.deadTime,
            stats.gateState,
-           detector->alias);
+           module->alias,
+           channel);
 
-    /* If a previous process was aborted during a run, sometimes we get an extra
-     * histogram data response on startup.
-     */
-    fDetector = detector->pslData;
-    if (fDetector == NULL) {
-        free(accepted.data);
-        free(rejected.data);
-        status = XIA_INVALID_DETCHAN;
-        pslLog(PSL_LOG_ERROR, status,
-               "Detector data uninitialized for histogram data channel: %d", channel);
-        return status;
-    }
-
-    status = psl__DetectorLock(detector);
+    status = psl__DetectorLock(fDetector);
     if (status != XIA_SUCCESS) {
         free(accepted.data);
         free(rejected.data);
         pslLog(PSL_LOG_ERROR, status,
-               "Unable to lock the detector: %s", detector->alias);
+               "Unable to lock the detector: %s:%d", module->alias, channel);
         return status;
     }
 
@@ -6283,27 +6447,29 @@ PSL_STATIC int psl__ReceiveHistogramData(Module* module, SincBuffer* packet)
         break;
 
     case MAPPING_MODE_MCA:
-        status = psl__ReceiveHistogram_MM0(detector,
+        status = psl__ReceiveHistogram_MM0(module,
+                                           fDetector,
+                                           channel,
                                            mmc,
                                            &accepted,
                                            &rejected,
                                            &stats);
         if (status != XIA_SUCCESS) {
             pslLog(PSL_LOG_ERROR, status,
-                   "Error in MM0 histogram receiver: %s", detector->alias);
+                   "Error in MM0 histogram receiver: %s:%d", module->alias, channel);
         }
         break;
 
     case MAPPING_MODE_MCA_FSM:
         status = psl__ReceiveHistogram_MM1(module,
-                                           detector,
+                                           fDetector,
                                            channel,
                                            mmc,
                                            &accepted,
                                            &stats);
         if (status != XIA_SUCCESS) {
             pslLog(PSL_LOG_ERROR, status,
-                   "Error in MM1 histogram receiver: %s", detector->alias);
+                   "Error in MM1 histogram receiver: %s:%d", module->alias, channel);
         }
         break;
 
@@ -6312,15 +6478,15 @@ PSL_STATIC int psl__ReceiveHistogramData(Module* module, SincBuffer* packet)
     case MAPPING_MODE_COUNT:
     default:
         pslLog(PSL_LOG_ERROR, XIA_INVALID_VALUE,
-               "Invalid mapping mode (%d): %s",
-               psl__MappingModeControl_Mode(mmc), detector->alias);
+               "Invalid mapping mode (%d): %s:%d",
+               psl__MappingModeControl_Mode(mmc), module->alias, channel);
         break;
     }
 
-    status = psl__DetectorUnlock(detector);
+    status = psl__DetectorUnlock(fDetector);
     if (status != XIA_SUCCESS) {
         pslLog(PSL_LOG_ERROR, status,
-               "Unable to unlock the detector: %s", detector->alias);
+               "Unable to unlock the detector: %s:%d", module->alias, channel);
         /* drop through to free the memory */
     }
 
@@ -6345,7 +6511,6 @@ PSL_STATIC int psl__ReceiveOscilloscopeData(Module* module, SincBuffer* packet)
 
     FalconXNModule* fModule = module->pslData;
 
-    Detector* detector;
     FalconXNDetector* fDetector;
 
     int channel = -1;
@@ -6368,37 +6533,29 @@ PSL_STATIC int psl__ReceiveOscilloscopeData(Module* module, SincBuffer* packet)
         return status;
     }
 
-    detector = psl__FindDetector(module, channel);
-    if (detector == NULL) {
-        free(raw.data);
-        free(raw.intData);
-        status = XIA_INVALID_DETCHAN;
-        pslLog(PSL_LOG_ERROR, status,
-               "Cannot find channel detector: %d", channel);
-        return status;
-    }
+    fDetector = psl__FindDetector(module, channel);
 
-    fDetector = detector->pslData;
-
-    /* TODO: Handle this properly or return an error. This is happening with
-     * multi-channel systems during startup. When clearing the state of one
-     * channel (psl__StopDataAcquisition), we see responses for channels we
-     * haven't set up yet. It is unclear if this is something we need to
-     * handle or a bug in the protocol. case 12291
+    /* This is happening with multi-channel systems during startup.
+     * When clearing the state of one channel
+     * (psl__StopDataAcquisition), we see responses for channels we
+     * haven't set up yet. It is unclear if this is something we need
+     * to handle or a bug in the protocol. case 12291
      */
     if (fDetector == NULL) {
+        free(raw.data);
+        free(raw.intData);
         pslLog(PSL_LOG_WARNING,
                "Received scope data for unintialized detector %d", channel);
         return XIA_SUCCESS;
     }
 
-    status = psl__DetectorLock(detector);
+    status = psl__DetectorLock(fDetector);
 
     fDetector->adcTrace = raw;
 
     fDetector->asyncStatus = XIA_SUCCESS;
 
-    psl__DetectorUnlock(detector);
+    psl__DetectorUnlock(fDetector);
 
     return status;
 }
@@ -6409,7 +6566,6 @@ PSL_STATIC int psl__ReceiveCalibrationProgress(Module* module, SincBuffer* packe
 
     int channel = -1;
 
-    Detector* detector;
     FalconXNDetector* fDetector;
 
     SiToro__Sinc__CalibrationProgressResponse* resp;
@@ -6433,8 +6589,8 @@ PSL_STATIC int psl__ReceiveCalibrationProgress(Module* module, SincBuffer* packe
         return status;
     }
 
-    detector = psl__FindDetector(module, channel);
-    if (detector == NULL) {
+    fDetector = psl__FindDetector(module, channel);
+    if (fDetector == NULL) {
         si_toro__sinc__calibration_progress_response__free_unpacked(resp, NULL);
         status = XIA_INVALID_DETCHAN;
         pslLog(PSL_LOG_ERROR, status,
@@ -6442,13 +6598,11 @@ PSL_STATIC int psl__ReceiveCalibrationProgress(Module* module, SincBuffer* packe
         return status;
     }
 
-    status = psl__DetectorLock(detector);
+    status = psl__DetectorLock(fDetector);
     if (status != 0) {
         si_toro__sinc__calibration_progress_response__free_unpacked(resp, NULL);
         return status;
     }
-
-    fDetector = detector->pslData;
 
     if (resp->has_progress && (resp->progress != 0.0)) {
         fDetector->calibPercentage = resp->progress;
@@ -6464,7 +6618,7 @@ PSL_STATIC int psl__ReceiveCalibrationProgress(Module* module, SincBuffer* packe
 
     si_toro__sinc__calibration_progress_response__free_unpacked(resp, NULL);
 
-    status = psl__DetectorUnlock(detector);
+    status = psl__DetectorUnlock(fDetector);
 
     return status;
 }
@@ -6570,7 +6724,6 @@ PSL_STATIC int psl__ReceiveGetCalibration(Module* module, SincBuffer* packet)
 {
     int status;
 
-    Detector* detector;
     FalconXNDetector* fDetector;
 
     int channel = -1;
@@ -6601,8 +6754,8 @@ PSL_STATIC int psl__ReceiveGetCalibration(Module* module, SincBuffer* packet)
     pslLog(PSL_LOG_DEBUG,
            "Got det-char response for channel %d", channel);
 
-    detector = psl__FindDetector(module, channel);
-    if (detector == NULL) {
+    fDetector = psl__FindDetector(module, channel);
+    if (fDetector == NULL) {
         free(data.data);
         falconXNClearCalibrationData(&example);
         falconXNClearCalibrationData(&model);
@@ -6614,9 +6767,7 @@ PSL_STATIC int psl__ReceiveGetCalibration(Module* module, SincBuffer* packet)
         return status;
     }
 
-    fDetector = detector->pslData;
-
-    status = psl__DetectorLock(detector);
+    status = psl__DetectorLock(fDetector);
     if (status != XIA_SUCCESS) {
         free(data.data);
         falconXNClearCalibrationData(&example);
@@ -6631,7 +6782,7 @@ PSL_STATIC int psl__ReceiveGetCalibration(Module* module, SincBuffer* packet)
     fDetector->calibModel = model;
     fDetector->calibFinal = final;
 
-    status = psl__DetectorUnlock(detector);
+    status = psl__DetectorUnlock(fDetector);
     if (status != XIA_SUCCESS) {
         psl__ModuleStatusResponse(module, status);
         return status;
@@ -6708,7 +6859,6 @@ PSL_STATIC int psl__ReceiveParamUpdated(Module* module, SincBuffer* packet)
 
     int channel = -1;
 
-    Detector* detector;
     FalconXNDetector* fDetector;
 
     SiToro__Sinc__ParamUpdatedResponse* resp;
@@ -6729,8 +6879,8 @@ PSL_STATIC int psl__ReceiveParamUpdated(Module* module, SincBuffer* packet)
         return status;
     }
 
-    detector = psl__FindDetector(module, channel);
-    if (detector == NULL) {
+    fDetector = psl__FindDetector(module, channel);
+    if (fDetector == NULL) {
         si_toro__sinc__param_updated_response__free_unpacked(resp, NULL);
         status = XIA_INVALID_DETCHAN;
         psl__ModuleStatusResponse(module, status);
@@ -6739,13 +6889,7 @@ PSL_STATIC int psl__ReceiveParamUpdated(Module* module, SincBuffer* packet)
         return status;
     }
 
-    fDetector = detector->pslData;
-
-    if (fDetector == NULL) {
-        return XIA_SUCCESS;
-    }
-
-    status = psl__DetectorLock(detector);
+    status = psl__DetectorLock(fDetector);
     if (status != XIA_SUCCESS) {
         si_toro__sinc__param_updated_response__free_unpacked(resp, NULL);
         psl__ModuleStatusResponse(module, status);
@@ -6776,46 +6920,52 @@ PSL_STATIC int psl__ReceiveParamUpdated(Module* module, SincBuffer* packet)
          * We ignore some lock/unlock results to keep processing all params.
          */
         if (strcmp(kv->key, "channel.state") == 0) {
-            status = psl__UpdateChannelState(kv, detector);
+            status = psl__UpdateChannelState(kv, fDetector);
             if (status != XIA_SUCCESS) {
                 pslLog(PSL_LOG_ERROR, status, "Processing channel.state");
             }
         }
     }
 
-    status = psl__DetectorUnlock(detector);
+    status = psl__DetectorUnlock(fDetector);
 
     si_toro__sinc__param_updated_response__free_unpacked(resp, NULL);
+
 
     return status;
 }
 
 /* Parses a channel.state value from Sinc and updates the detector channel state. */
-PSL_STATIC int psl__UpdateChannelState(SiToro__Sinc__KeyValue* kv, Detector* detector)
+PSL_STATIC int psl__UpdateChannelState(SiToro__Sinc__KeyValue* kv,
+                                        FalconXNDetector* fDetector)
 {
     int status;
 
-    FalconXNDetector* fDetector = detector->pslData;
-
     if (kv->optionval) {
         if (strcmp(kv->optionval, "ready") == 0) {
-            fDetector->channelState = ChannelReady;
+            boolean_t getcalibration =
+                (fDetector->channelState == ChannelCharacterizing) ||
+                (fDetector->channelState == ChannelDisconnected);
 
+            /* Flag calibration refresh on startup or after characterization */
+            if (getcalibration)
+                fDetector->calibrationState = CalibrationNeedRefresh;
+
+            fDetector->channelState = ChannelReady;
             if (fDetector->asyncReady) {
                 fDetector->asyncReady = FALSE_;
-                status = psl__DetectorSignal(detector);
+                status = psl__DetectorSignal(fDetector);
                 if (status != XIA_SUCCESS) {
                     pslLog(PSL_LOG_ERROR, status,
                            "Detector event signal error");
+                    return status;
                 }
-
-                return status;
             }
         }
         else if (strcmp(kv->optionval, "error") == 0) {
             fDetector->channelState = ChannelError;
-            pslLog(PSL_LOG_WARNING, "Detector %s is in the error state",
-                   detector->alias);
+            pslLog(PSL_LOG_WARNING, "Detector %d is in the error state",
+                   fDetector->modDetChan);
         }
         else if (strcmp(kv->optionval, "osc") == 0) {
             fDetector->channelState = ChannelADC;
@@ -6825,7 +6975,7 @@ PSL_STATIC int psl__UpdateChannelState(SiToro__Sinc__KeyValue* kv, Detector* det
 
             if (fDetector->asyncReady) {
                 fDetector->asyncReady = FALSE_;
-                status = psl__DetectorSignal(detector);
+                status = psl__DetectorSignal(fDetector);
                 if (status != XIA_SUCCESS) {
                     pslLog(PSL_LOG_ERROR, status,
                            "Detector event signal error");
@@ -6998,6 +7148,10 @@ PSL_STATIC int psl__ModuleReceiveProcessor(Module*                   module,
     case SI_TORO__SINC__MESSAGE_TYPE__DOWNLOAD_CRASH_DUMP_COMMAND:
     case SI_TORO__SINC__MESSAGE_TYPE__DOWNLOAD_CRASH_DUMP_RESPONSE:
     case SI_TORO__SINC__MESSAGE_TYPE__CHECK_PARAM_CONSISTENCY_COMMAND:
+    case SI_TORO__SINC__MESSAGE_TYPE__TRIGGER_HISTOGRAM_COMMAND:
+    case SI_TORO__SINC__MESSAGE_TYPE__SYNCHRONIZE_LOG_COMMAND:
+    case SI_TORO__SINC__MESSAGE_TYPE__SYNCHRONIZE_LOG_RESPONSE:
+    case SI_TORO__SINC__MESSAGE_TYPE__SET_TIME_COMMAND:
     default:
         pslLog(PSL_LOG_INFO,
                "Invalid message type for FalconXN connection: %s:%d: %d",
@@ -7028,68 +7182,66 @@ PSL_STATIC void psl__ModuleReceiver(void* arg)
            "Receiver thread starting: %s", module->alias);
 
     r = handel_md_mutex_lock(&fModule->lock);
-    if (r == 0)
-    {
-        fModule->receiverRunning = TRUE_;
+    if (r != 0) {
+        pslLog(PSL_LOG_DEBUG,
+               "Receiver thread failed locking module: %s: %d", module->alias, r);
+        return;
+    }
 
-        while (fModule->receiverActive)
-        {
-            SiToro__Sinc__MessageType msgType;
-            int                       status;
-            uint8_t                   receiveBufferData[4096];
-            SincBuffer                sb = SINC_BUFFER_INIT(receiveBufferData);
-            boolean_t                 timeout = FALSE_;
+    fModule->receiverRunning = TRUE_;
 
-            /*
-             * The receive message in the Sinc API is thread safe in respect to
-             * the send path so we can unlock the module mutex. We hold the
-             * mutex while decoding the received data.
-             */
-            r = handel_md_mutex_unlock(&fModule->lock);
-            if (r != 0)
-                break;
+    while (fModule->receiverActive) {
+        SiToro__Sinc__MessageType msgType;
+        int                       status;
+        uint8_t                   receiveBufferData[4096];
+        SincBuffer                sb = SINC_BUFFER_INIT(receiveBufferData);
 
-            status = SincReadMessage(&fModule->sinc,
-                                     100,
-                                     &sb,
-                                     &msgType);
+        /*
+         * The receive message in the Sinc API is thread safe in respect to
+         * the send path so we can unlock the module mutex. We hold the
+         * mutex while decoding the received data.
+         */
+        r = handel_md_mutex_unlock(&fModule->lock);
+        if (r != 0)
+            break;
 
-            r = handel_md_mutex_lock(&fModule->lock);
-            if (r != 0)
-                break;
+        status = SincReadMessage(&fModule->sinc,
+                                 100,
+                                 &sb,
+                                 &msgType);
 
-            if (status != true) {
-                int sincErrCode = SincReadErrorCode(&fModule->sinc);
-                if (sincErrCode != SI_TORO__SINC__ERROR_CODE__TIMEOUT) {
-                    status = falconXNSincResultToHandel(sincErrCode,
-                                                        SincReadErrorMessage(&fModule->sinc));
-                    pslLog(PSL_LOG_ERROR, status,
-                           "Read message failed for FalconXN connection: %s:%d",
-                           fModule->hostAddress, fModule->portBase);
-                    continue;
-                }
-                timeout = TRUE_;
-            }
+        r = handel_md_mutex_lock(&fModule->lock);
+        if (r != 0)
+            break;
 
-            if (!timeout) {
-                status = psl__ModuleReceiveProcessor(module,
-                                                     msgType,
-                                                     &sb);
+        if (status != true) {
+            int sincErrCode = SincReadErrorCode(&fModule->sinc);
+            if (sincErrCode == SI_TORO__SINC__ERROR_CODE__TIMEOUT)
+                continue;
 
-                /* We have to clear SINC buffers after reading. They
-                 * do it for sends, so this is likely the only
-                 * place we need it.
-                 */
-                PSL_SINC_BUFFER_CLEAR(&sb);
-
-                if (status != XIA_SUCCESS) {
-                    continue;
-                }
-            }
+            status = falconXNSincResultToHandel(sincErrCode,
+                                                SincReadErrorMessage(&fModule->sinc));
+            pslLog(PSL_LOG_ERROR, status,
+                   "Read message failed for FalconXN connection: %s:%d",
+                   fModule->hostAddress, fModule->portBase);
+            break;
         }
 
-        fModule->receiverRunning = FALSE_;
+        status = psl__ModuleReceiveProcessor(module,
+                                             msgType,
+                                             &sb);
+
+        /* We have to clear SINC buffers after reading. They
+         * do it for sends, so this is likely the only
+         * place we need it.
+         */
+        PSL_SINC_BUFFER_CLEAR(&sb);
+
+        if (status != XIA_SUCCESS)
+            continue;
     }
+
+    fModule->receiverRunning = FALSE_;
 
     pslLog(PSL_LOG_DEBUG,
            "Receiver thread stopping: %s: %d", module->alias, r);
@@ -7377,39 +7529,28 @@ PSL_STATIC int psl__SetupDetChan(int detChan, Detector *detector, Module *module
     FalconXNModule* fModule = NULL;
     FalconXNDetector* fDetector = NULL;
 
-    int modDetChan;
+    int modChan = xiaGetModChan(detChan);
 
-    modDetChan = xiaGetModChan(detChan);
-
-    if (modDetChan == 999) {
-        pslLog(PSL_LOG_ERROR, XIA_INVALID_DETCHAN,
-               "Unable to get the FalconXN module channel for detector channel: %d",
-               detChan);
-        return XIA_INVALID_DETCHAN;
+    if (modChan == 999) {
+        pslLog(PSL_LOG_ERROR, XIA_BAD_PSL_ARGS,
+               "Can't find modChan for module %s detChan %d",
+               module->alias, detChan);
+        return XIA_BAD_CHANNEL;
     }
 
-    pslLog(PSL_LOG_DEBUG,
-           "Set up %s (%d/%d)", module->alias, modDetChan, detChan);
+    pslLog(PSL_LOG_DEBUG, "Set up %s (%d/%d)", module->alias, modChan, detChan);
 
     if (!module) {
-        xiaLog(XIA_LOG_ERROR, XIA_BAD_PSL_ARGS, "psl__SetupDetChan",
-               "Module is NULL");
+        pslLog(PSL_LOG_ERROR, XIA_BAD_PSL_ARGS, "Module is NULL");
         return XIA_BAD_PSL_ARGS;
     }
 
     if (!module->pslData) {
-        xiaLog(XIA_LOG_ERROR, XIA_BAD_PSL_ARGS, "psl__SetupDetChan",
-               "Module PSL data is NULL");
+        pslLog(PSL_LOG_ERROR, XIA_BAD_PSL_ARGS, "Module PSL data is NULL");
         return XIA_BAD_PSL_ARGS;
     }
 
-    if (!detector) {
-        xiaLog(XIA_LOG_ERROR, XIA_BAD_PSL_ARGS, "psl__SetupDetChan",
-               "Detector is NULL");
-        return XIA_BAD_PSL_ARGS;
-    }
-
-    ASSERT(detector->pslData == NULL);
+    ASSERT(module->ch[modChan].pslData == NULL);
 
     fModule = module->pslData;
 
@@ -7425,9 +7566,9 @@ PSL_STATIC int psl__SetupDetChan(int detChan, Detector *detector, Module *module
      */
     memset(fDetector, 0, sizeof(*fDetector));
 
-    fDetector->modDetChan = modDetChan;
+    fDetector->modDetChan = modChan;
     fDetector->mmc.mode = MAPPING_MODE_NIL;
-    fModule->channelActive[fDetector->modDetChan] = TRUE_;
+    fModule->channelActive[modChan] = TRUE_;
 
     status = handel_md_mutex_create(&fDetector->lock);
     if (status != 0) {
@@ -7452,17 +7593,18 @@ PSL_STATIC int psl__SetupDetChan(int detChan, Detector *detector, Module *module
         return status;
     }
 
-    detector->pslData = fDetector;
+    module->ch[modChan].pslData = fDetector;
 
     fDetector->detChan = detChan;
 
     fDetector->channelState = ChannelDisconnected;
+    fDetector->calibrationState = CalibrationNeedRefresh;
 
     falconXNClearDetectorStats(fDetector);
 
-    status = psl__RefreshChannelState(module, detector);
+    status = psl__RefreshChannelState(module, fDetector);
     if (status != XIA_SUCCESS) {
-        detector->pslData = NULL;
+        module->ch[modChan].pslData = NULL;
         handel_md_event_destroy(&fDetector->asyncEvent);
         handel_md_mutex_destroy(&fDetector->lock);
         handel_md_free(fDetector);
@@ -7476,7 +7618,7 @@ PSL_STATIC int psl__SetupDetChan(int detChan, Detector *detector, Module *module
                fDetector->channelState);
         status = psl__StopDataAcquisition(module, fDetector->modDetChan, false);
         if (status != XIA_SUCCESS) {
-            detector->pslData = NULL;
+            module->ch[modChan].pslData = NULL;
             handel_md_event_destroy(&fDetector->asyncEvent);
             handel_md_mutex_destroy(&fDetector->lock);
             handel_md_free(fDetector);
@@ -7486,9 +7628,9 @@ PSL_STATIC int psl__SetupDetChan(int detChan, Detector *detector, Module *module
         }
     }
 
-    status = psl__LoadChannelFeatures(module, detector);
+    status = psl__LoadChannelFeatures(module, modChan);
     if (status != XIA_SUCCESS) {
-        detector->pslData = NULL;
+        module->ch[modChan].pslData = NULL;
         handel_md_event_destroy(&fDetector->asyncEvent);
         handel_md_mutex_destroy(&fDetector->lock);
         handel_md_free(fDetector);
@@ -7497,9 +7639,9 @@ PSL_STATIC int psl__SetupDetChan(int detChan, Detector *detector, Module *module
         return status;
     }
 
-    status = psl__MonitorChannel(module, detector);
+    status = psl__MonitorChannel(module);
     if (status != XIA_SUCCESS) {
-        detector->pslData = NULL;
+        module->ch[modChan].pslData = NULL;
         handel_md_event_destroy(&fDetector->asyncEvent);
         handel_md_mutex_destroy(&fDetector->lock);
         handel_md_free(fDetector);
@@ -7513,6 +7655,17 @@ PSL_STATIC int psl__SetupDetChan(int detChan, Detector *detector, Module *module
 
 PSL_STATIC int psl__EndDetChan(int detChan, Detector *detector, Module *module)
 {
+    UNUSED(detector);
+
+    int modChan = xiaGetModChan(detChan);
+
+    if (modChan == 999) {
+        pslLog(PSL_LOG_ERROR, XIA_BAD_PSL_ARGS,
+               "Can't find modChan for module %s detChan %d",
+               module->alias, detChan);
+        return XIA_BAD_CHANNEL;
+    }
+
     if (!module) {
         pslLog(PSL_LOG_ERROR, XIA_BAD_PSL_ARGS,"Module is NULL");
         return XIA_BAD_PSL_ARGS;
@@ -7524,18 +7677,12 @@ PSL_STATIC int psl__EndDetChan(int detChan, Detector *detector, Module *module)
         return XIA_BAD_PSL_ARGS;
     }
 
-    if (!detector) {
-        pslLog(PSL_LOG_ERROR, XIA_BAD_PSL_ARGS,
-               "Detector is NULL");
-        return XIA_BAD_PSL_ARGS;
-    }
-
     pslLog(PSL_LOG_DEBUG,
-           "Detector %s (%d)", detector->alias, detChan);
+           "Detector %s:%d", module->alias, modChan);
 
-    if (detector->pslData) {
+    if (module->ch[modChan].pslData) {
         FalconXNModule* fModule = module->pslData;
-        FalconXNDetector* fDetector = detector->pslData;
+        FalconXNDetector* fDetector = psl__FindDetector(module, modChan);
 
         psl__ModuleLock(module);
 
@@ -7543,17 +7690,17 @@ PSL_STATIC int psl__EndDetChan(int detChan, Detector *detector, Module *module)
 
         fModule->channelActive[fDetector->modDetChan] = FALSE_;
 
-        psl__ModuleUnlock(module);
-
-        psl__MonitorChannel(module, detector);
-
-        psl__ModuleLock(module);
+        if (fModule->receiverRunning) {
+            psl__ModuleUnlock(module);
+            psl__MonitorChannel(module);
+            psl__ModuleLock(module);
+        }
 
         handel_md_event_destroy(&fDetector->asyncEvent);
         handel_md_mutex_destroy(&fDetector->lock);
         handel_md_free(fDetector);
 
-        detector->pslData = NULL;
+        module->ch[modChan].pslData = NULL;
 
         psl__ModuleUnlock(module);
     }
@@ -7577,7 +7724,6 @@ PSL_STATIC bool psl__AcqRemoved(const char *name)
     return false;
 }
 
-
 PSL_STATIC int psl__UserSetup(int detChan, Detector *detector, Module *module)
 {
     int status;
@@ -7586,26 +7732,43 @@ PSL_STATIC int psl__UserSetup(int detChan, Detector *detector, Module *module)
 
     XiaDaqEntry* entry;
 
-    FalconXNDetector* fDetector = detector->pslData;
+    FalconXNDetector* fDetector;
 
-    int channel = xiaGetModDetectorChan(detChan);
+    int channel = xiaGetModChan(detChan);
 
     int i;
 
-    xiaPSLBadArgs(module, detector, "psl__UserSetup");
+    xiaPSLBadArgs(detChan, module, detector);
 
     pslLog(PSL_LOG_DEBUG,
-           "%s (%d:%d) user set up", module->alias, fDetector->modDetChan, detChan);
+           "%s (%d:%d) user set up", module->alias, channel, detChan);
+
+    fDetector = psl__FindDetector(module, channel);
 
     /*
-     * Load the detector characterization data if there is any.
+     * Load the detector characterization data from the old firmware
+     * definition filename if there is one.
      */
-    status = psl__LoadDetCharacterization(detector, module);
+    status = psl__LoadDetCharacterization(fDetector, module);
 
     if ((status != XIA_SUCCESS) && (status != XIA_NOT_FOUND)) {
         pslLog(PSL_LOG_ERROR, status,
                "Error setting the detector characterization data: %s (%d)",
                detector->alias, detChan);
+        return status;
+    }
+
+    /*
+     * Load the detector characterization data from the .ini file's
+     * module channel data in the current system.
+     */
+    status = psl__LoadChanData(fDetector->modDetChan, module);
+    if (status != XIA_SUCCESS) {
+        module->ch[channel].pslData = NULL;
+        handel_md_event_destroy(&fDetector->asyncEvent);
+        handel_md_mutex_destroy(&fDetector->lock);
+        handel_md_free(fDetector);
+        pslLog(PSL_LOG_ERROR, status, "Unable to load channel data");
         return status;
     }
 
@@ -7645,7 +7808,7 @@ PSL_STATIC int psl__UserSetup(int detChan, Detector *detector, Module *module)
     for (i = 0; i < SI_DET_NUM_OF_DEFAULT_ACQ_VALUES; i++) {
         if (DEFAULT_ACQ_VALUES[i].sync != NULL) {
             status = DEFAULT_ACQ_VALUES[i].sync(detChan, channel,
-                                                  module, detector, defaults);
+                                                module, detector, defaults);
             if (status != XIA_SUCCESS) {
                 pslLog(PSL_LOG_ERROR, status,
                        "Error synchronizing '%s' for detChan %d (%u)",
@@ -7704,7 +7867,7 @@ PSL_STATIC int psl__UserSetup(int detChan, Detector *detector, Module *module)
     /*
      * Set digital pin configuration.
      */
-    status = psl__SetDigitalConf(detChan, detector, module);
+    status = psl__SetDigitalConf(fDetector->modDetChan, module);
 
     if (status != XIA_SUCCESS) {
         pslLog(PSL_LOG_ERROR, status,
@@ -7728,7 +7891,7 @@ PSL_STATIC int psl__BoardOperation(int detChan, Detector* detector, Module* modu
 
     ASSERT(value);
 
-    xiaPSLBadArgs(module, detector, "psl__BoardOperation");
+    xiaPSLBadArgs(detChan, module, detector);
 
     for (i = 0; i < (int) N_ELEMS(boardOps); i++) {
         if (STREQ(name, boardOps[i].name)) {
@@ -7776,7 +7939,7 @@ PSL_STATIC boolean_t psl__CanRemoveName(const char *name)
     return FALSE_;
 }
 
-PSL_STATIC int psl__DetCharacterizeStart(int detChan, Detector* detector, Module* module)
+PSL_STATIC int psl__DetCharacterizeStart(int detChan, FalconXNDetector* fDetector, Module* module)
 {
     int status;
 
@@ -7815,7 +7978,7 @@ PSL_STATIC int psl__DetCharacterizeStart(int detChan, Detector* detector, Module
     kv.has_boolval = TRUE_;
     kv.boolval = TRUE_;
 
-    status = psl__SetParam(module, detector, &kv);
+    status = psl__SetParam(module, modChan, &kv);
     if (status != XIA_SUCCESS) {
         pslLog(PSL_LOG_ERROR, status,
                "Error setting pulse optimization for starting characterization");
@@ -7823,9 +7986,20 @@ PSL_STATIC int psl__DetCharacterizeStart(int detChan, Detector* detector, Module
     }
 
     /*
+     * Disable GATE veto mode so pulses are collected by default during characterization.
+     */
+    status = psl__ClearGateVetoMode(module, fDetector);
+    if (status != XIA_SUCCESS) {
+        pslLog(PSL_LOG_ERROR, status,
+               "Error clearing the GATE veto for starting characterization: %s:%d",
+               module->alias, modChan);
+        return status;
+    }
+
+    /*
      * Start the detector characterization.
      */
-    SincEncodeStartCalibration(&packet, psl__DetectorChannel(detector));
+    SincEncodeStartCalibration(&packet, psl__DetectorChannel(fDetector));
 
     status = psl__ModuleTransactionSend(module, &packet);
     if (status != XIA_SUCCESS) {
@@ -7841,8 +8015,7 @@ PSL_STATIC int psl__DetCharacterizeStart(int detChan, Detector* detector, Module
     return status;
 }
 
-PSL_STATIC int psl__WriteDetCharacterizationWave(FILE* dcFile,
-                                                 const char *filename,
+PSL_STATIC int psl__WriteDetCharacterizationWave(xia_sio *dcFile,
                                                  const char* name,
                                                  const double* data,
                                                  const int len)
@@ -7850,52 +8023,81 @@ PSL_STATIC int psl__WriteDetCharacterizationWave(FILE* dcFile,
     int status = XIA_SUCCESS;
 
     ssize_t lineLength = 0;
-    ssize_t written =  0;
+    int written =  0;
     int i;
+    double start, incr;
 
-    written = fprintf(dcFile, "%s=%d\n", name, len);
+    /*
+     * Compress the data to just a start value and increment if all
+     * increments match exactly.
+     */
+    if (len > 1) {
+        start = data[0];
+        incr = data[1] - data[0];
+
+        for (i = 2; i < len; i++) {
+            double iIncr = data[i] - data[i -1];
+            if (iIncr != incr)
+                break;
+        }
+
+        if (i == len) {
+            written = xia_sio_printf(dcFile, "%s=%d,start=%f,incr=%f\n", name, len, start, incr);
+            if (written < 0) {
+                xia_sio_close(dcFile);
+                status = -written;
+                pslLog(PSL_LOG_ERROR, status,
+                       "Writing to detector characterization %s size failed.",
+                       name);
+                return status;
+            }
+            return XIA_SUCCESS;
+        }
+    }
+
+    written = xia_sio_printf(dcFile, "%s=%d\n", name, len);
     if (written < 0) {
-        xia_file_close(dcFile);
-        status = XIA_BAD_FILE_WRITE;
-        xiaLog(XIA_LOG_ERROR, status, "psl__WriteDetCharacterizationWave",
-               "Writing to detector characterization %s size failed: %s: (%d) %s",
-               name, filename, errno, strerror(errno));
+        xia_sio_close(dcFile);
+        status = -written;
+        pslLog(PSL_LOG_ERROR, status,
+               "Writing to detector characterization %s size failed.",
+               name);
         return status;
     }
 
     for (i = 0; i < (len - 1); ++i) {
-        written = fprintf(dcFile, "%f,", data[i]);
+        written = xia_sio_printf(dcFile, "%f,", data[i]);
         if (written < 0) {
-            xia_file_close(dcFile);
-            status = XIA_BAD_FILE_WRITE;
-            xiaLog(XIA_LOG_ERROR, status, "psl__WriteDetCharacterizationWave",
-                   "Writing to detector characterization %s failed: %s: (%d) %s",
-                   name, filename, errno, strerror(errno));
+            xia_sio_close(dcFile);
+            status = -written;
+            pslLog(PSL_LOG_ERROR, status,
+                   "Writing to detector characterization %s failed.",
+                   name);
             return status;
         }
 
         lineLength += written;
         if (lineLength > 60) {
-            written = fprintf(dcFile, "\n");
+            written = xia_sio_printf(dcFile, "\n");
             if (written < 0) {
-                xia_file_close(dcFile);
-                status = XIA_BAD_FILE_WRITE;
-                xiaLog(XIA_LOG_ERROR, status, "psl__WriteDetCharacterizationWave",
-                       "Writing to detector characterization %s failed: %s: (%d) %s",
-                       name, filename, errno, strerror(errno));
+                xia_sio_close(dcFile);
+                status = -written;
+                pslLog(PSL_LOG_ERROR, status,
+                       "Writing to detector characterization %s failed.",
+                       name);
                 return status;
             }
             lineLength = 0;
         }
     }
 
-    written = fprintf(dcFile, "%f\n", data[i]);
+    written = xia_sio_printf(dcFile, "%f\n", data[i]);
     if (written < 0) {
-        xia_file_close(dcFile);
-        status = XIA_BAD_FILE_WRITE;
-        xiaLog(XIA_LOG_ERROR, status, "psl__WriteDetCharacterizationWave",
-               "Writing to detector characterization %s failed: %s: (%d) %s",
-               name, filename, errno, strerror(errno));
+        xia_sio_close(dcFile);
+        status = -written;
+        pslLog(PSL_LOG_ERROR, status,
+               "Writing to detector characterization %s failed.",
+               name);
         return status;
     }
 
@@ -7903,46 +8105,15 @@ PSL_STATIC int psl__WriteDetCharacterizationWave(FILE* dcFile,
 }
 
 PSL_STATIC int psl__UnloadDetCharacterization(Module* module,
-                                              Detector* detector,
-                                              const char *filename)
+                                              FalconXNDetector* fDetector,
+                                              xia_sio *dcFile)
 {
     int status = XIA_SUCCESS;
 
-    FalconXNDetector* fDetector = detector->pslData;
+    UNUSED(module);
 
-    SiToro__Sinc__GetParamResponse* resp = NULL;
-    SiToro__Sinc__KeyValue*         kv;
-
-    FILE* dcFile = NULL;
-
-    boolean_t calibrated = FALSE_;
-
-    status = psl__GetParam(module, psl__DetectorChannel(detector),
-                           "pulse.calibrated", &resp);
-    if (status != XIA_SUCCESS) {
-        pslLog(PSL_LOG_ERROR, status,
-               "Unable to get pulse.calibrated");
-        return status;
-    }
-
-    kv = resp->results[0];
-
-    if (kv->has_paramtype &&
-        (kv->paramtype == SI_TORO__SINC__KEY_VALUE__PARAM_TYPE__BOOL_TYPE)) {
-        calibrated = kv->boolval ? TRUE_ : FALSE_;
-    }
-
-    si_toro__sinc__get_param_response__free_unpacked(resp, NULL);
-
-    if (!calibrated)
+    if (!psl__GetCalibrated(module, fDetector))
         return XIA_SUCCESS;
-
-    status = psl__GetCalibration(module, detector);
-    if (status != XIA_SUCCESS) {
-        pslLog(PSL_LOG_ERROR, status,
-               "Cannot get calibration data");
-        return status;
-    }
 
     /*
      * Make sure the data returned from the FalconX is sane. Reject it
@@ -7964,141 +8135,120 @@ PSL_STATIC int psl__UnloadDetCharacterization(Module* module,
         return XIA_SUCCESS;
     }
 
-    xiaLog(XIA_LOG_INFO, "psl__UnloadDetCharacterization",
-           "writing detector characterization file: %s", filename);
+    ssize_t lineLength = 0;
+    int written = 0;
+    int i;
 
-    dcFile = xia_file_open(filename, "w");
-
-    if (dcFile == NULL) {
-        status = XIA_NOT_FOUND;
-        xiaLog(XIA_LOG_ERROR, status, "psl__UnloadDetCharacterization",
-               "Could not open: %s", filename);
+    written = xia_sio_printf(dcFile, "data=%d\n", fDetector->calibData.len);
+    if (written < 0) {
+        status = -written;
+        pslLog(PSL_LOG_ERROR, status,
+               "Writing to detector characterization data size failed.");
+        return status;
     }
-    else {
-        ssize_t lineLength = 0;
-        ssize_t written =  0;
-        int i;
 
-        written = fprintf(dcFile, "data=%d\n", fDetector->calibData.len);
+    for (i = 0; i < (fDetector->calibData.len - 1); ++i) {
+        written = xia_sio_printf(dcFile, "%02x,", fDetector->calibData.data[i]);
         if (written < 0) {
-            xia_file_close(dcFile);
-            status = XIA_BAD_FILE_WRITE;
-            xiaLog(XIA_LOG_ERROR, status, "psl__UnloadDetCharacterization",
-                   "Writing to detector characterization data size failed: %s: (%d) %s",
-                   filename, errno, strerror(errno));
+            status = -written;
+            pslLog(PSL_LOG_ERROR, status,
+                   "Writing to detector characterization data failed.");
             return status;
         }
 
-        for (i = 0; i < (fDetector->calibData.len - 1); ++i) {
-            written = fprintf(dcFile, "%02x,", fDetector->calibData.data[i]);
+        lineLength += written;
+        if (lineLength > 60) {
+            written = xia_sio_printf(dcFile, "\n");
             if (written < 0) {
-                xia_file_close(dcFile);
-                status = XIA_BAD_FILE_WRITE;
-                xiaLog(XIA_LOG_ERROR, status, "psl__UnloadDetCharacterization",
-                       "Writing to detector characterization data failed: %s: (%d) %s",
-                       filename, errno, strerror(errno));
+                status = -written;
+                pslLog(PSL_LOG_ERROR, status,
+                       "Writing to detector characterization data failed.");
                 return status;
             }
+            lineLength = 0;
+        }
+    }
 
-            lineLength += written;
-            if (lineLength > 60) {
-                written = fprintf(dcFile, "\n");
-                if (written < 0) {
-                    xia_file_close(dcFile);
-                    status = XIA_BAD_FILE_WRITE;
-                    xiaLog(XIA_LOG_ERROR, status, "psl__UnloadDetCharacterization",
-                           "Writing to detector characterization data failed: %s: (%d) %s",
-                           filename, errno, strerror(errno));
-                    return status;
-                }
-                lineLength = 0;
-            }
-        }
+    written = xia_sio_printf(dcFile, "%02x\n", fDetector->calibData.data[i]);
+    if (written < 0) {
+        status = -written;
+        pslLog(PSL_LOG_ERROR, status,
+               "Writing to detector characterization data failed.");
+        return status;
+    }
 
-        written = fprintf(dcFile, "%02x\n", fDetector->calibData.data[i]);
-        if (written < 0) {
-            xia_file_close(dcFile);
-            status = XIA_BAD_FILE_WRITE;
-            xiaLog(XIA_LOG_ERROR, status, "psl__UnloadDetCharacterization",
-                   "Writing to detector characterization data failed: %s: (%d) %s",
-                   filename, errno, strerror(errno));
-            return status;
-        }
+    /*
+     * Example waveform.
+     */
+    status = psl__WriteDetCharacterizationWave(dcFile,
+                                               "example-x",
+                                               fDetector->calibExample.x,
+                                               fDetector->calibExample.len);
+    if (status != XIA_SUCCESS) {
+        return status;
+    }
+    status = psl__WriteDetCharacterizationWave(dcFile,
+                                               "example-y",
+                                               fDetector->calibExample.y,
+                                               fDetector->calibExample.len);
+    if (status != XIA_SUCCESS) {
+        return status;
+    }
 
-        /*
-         * Example waveform.
-         */
-        status = psl__WriteDetCharacterizationWave(dcFile,
-                                                   filename,
-                                                   "example-x",
-                                                   fDetector->calibExample.x,
-                                                   fDetector->calibExample.len);
-        if (status != XIA_SUCCESS) {
-            xia_file_close(dcFile);
-            return status;
-        }
-        status = psl__WriteDetCharacterizationWave(dcFile,
-                                                   filename,
-                                                   "example-y",
-                                                   fDetector->calibExample.y,
-                                                   fDetector->calibExample.len);
-        if (status != XIA_SUCCESS) {
-            xia_file_close(dcFile);
-            return status;
-        }
+    /*
+     * Model waveform.
+     */
+    status = psl__WriteDetCharacterizationWave(dcFile,
+                                               "model-x",
+                                               fDetector->calibModel.x,
+                                               fDetector->calibModel.len);
+    if (status != XIA_SUCCESS) {
+        return status;
+    }
+    status = psl__WriteDetCharacterizationWave(dcFile,
+                                               "model-y",
+                                               fDetector->calibModel.y,
+                                               fDetector->calibModel.len);
+    if (status != XIA_SUCCESS) {
+        return status;
+    }
 
-        /*
-         * Model waveform.
-         */
-        status = psl__WriteDetCharacterizationWave(dcFile,
-                                                   filename,
-                                                   "model-x",
-                                                   fDetector->calibModel.x,
-                                                   fDetector->calibModel.len);
-        if (status != XIA_SUCCESS) {
-            xia_file_close(dcFile);
-            return status;
-        }
-        status = psl__WriteDetCharacterizationWave(dcFile,
-                                                   filename,
-                                                   "model-y",
-                                                   fDetector->calibModel.y,
-                                                   fDetector->calibModel.len);
-        if (status != XIA_SUCCESS) {
-            xia_file_close(dcFile);
-            return status;
-        }
-
-        /*
-         * Final waveform.
-         */
-        status = psl__WriteDetCharacterizationWave(dcFile,
-                                                   filename,
-                                                   "final-x",
-                                                   fDetector->calibFinal.x,
-                                                   fDetector->calibFinal.len);
-        if (status != XIA_SUCCESS) {
-            xia_file_close(dcFile);
-            return status;
-        }
-        status = psl__WriteDetCharacterizationWave(dcFile,
-                                                   filename,
-                                                   "final-y",
-                                                   fDetector->calibFinal.y,
-                                                   fDetector->calibFinal.len);
-        if (status != XIA_SUCCESS) {
-            xia_file_close(dcFile);
-            return status;
-        }
-
-        xia_file_close(dcFile);
+    /*
+     * Final waveform.
+     */
+    status = psl__WriteDetCharacterizationWave(dcFile,
+                                               "final-x",
+                                               fDetector->calibFinal.x,
+                                               fDetector->calibFinal.len);
+    if (status != XIA_SUCCESS) {
+        return status;
+    }
+    status = psl__WriteDetCharacterizationWave(dcFile,
+                                               "final-y",
+                                               fDetector->calibFinal.y,
+                                               fDetector->calibFinal.len);
+    if (status != XIA_SUCCESS) {
+        return status;
     }
 
     return status;
 }
 
-PSL_STATIC int psl__ReadDetCharacterizationWave(FILE* dcFile,
-                                                const char *filename,
+
+/*
+ * Read waveform data from a string. The first line of a waveform is
+ * the name and length. This is followed by an initial value and
+ * increment on the same line, which is used to compress x-values, or
+ * the actual values on following lines. For example:
+ *
+ * example-y=1234
+ * 0.0,0.0,1.234,...,
+ * 1.234,2.345,...,
+ * 0.0,0.0
+ *
+ * example-x=1234,start=0.0,incr=1.0
+ */
+PSL_STATIC int psl__ReadDetCharacterizationWave(xia_sio *dcStream,
                                                 const char* name,
                                                 double** ddata,
                                                 int* len,
@@ -8109,31 +8259,40 @@ PSL_STATIC int psl__ReadDetCharacterizationWave(FILE* dcFile,
     double* data;
     char line[XIA_LINE_LEN];
     char* p;
+    int match;
     int i;
+    double start, incr;
 
     *lc += 1;
-    p = handel_md_fgets(line, XIA_LINE_LEN, dcFile);
+    p = xia_sio_gets(dcStream, line, XIA_LINE_LEN);
 
     if (p == NULL) {
         status = XIA_BAD_FILE_READ;
-        xiaLog(XIA_LOG_ERROR, status, "psl__ReadDetCharacterizationWave",
-               "Could not read %s length: %s:%d", name, filename, *lc);
+        pslLog(PSL_LOG_ERROR, status,
+               "Could not read %s length %d:%.40s", name, *lc, line);
         return status;
     }
 
     if (!STRNEQ(line, name)) {
         status = XIA_BAD_FILE_READ;
-        xiaLog(XIA_LOG_ERROR, status, "psl__ReadDetCharacterizationWave",
-               "Could not find %s length: %s:%d", name, filename, *lc);
+        pslLog(PSL_LOG_ERROR, status,
+               "Could not find %s length %d:%.40s", name, *lc, line);
         return status;
     }
 
-    i = atoi(line + strlen(name) + 1);
+    match = sscanf(line + strlen(name) + 1, "%d,start=%lf,incr=%lf", &i, &start, &incr);
+
+    if (match != 1 && match != 3) {
+        status = XIA_BAD_FILE_READ;
+        pslLog(PSL_LOG_ERROR, status,
+               "Could not match %s length %d:%.40s", name, *lc, line);
+        return status;
+    }
 
     if ((*len != 0) && (i != *len)) {
         status = XIA_BAD_FILE_READ;
-        xiaLog(XIA_LOG_ERROR, status, "psl__ReadDetCharacterizationWave",
-               "Could not match %s length: %s:%d", name, filename, *lc);
+        pslLog(PSL_LOG_ERROR, status,
+               "Could not match %s length %d:%.40s", name, *lc, line);
         return status;
     }
 
@@ -8142,10 +8301,22 @@ PSL_STATIC int psl__ReadDetCharacterizationWave(FILE* dcFile,
     *ddata = data = handel_md_alloc((size_t) *len * sizeof(double));
     if (data == NULL) {
         status = XIA_NOMEM;
-        xiaLog(XIA_LOG_ERROR, status, "psl__LoadDetCharacterization",
-               "No memory for %s length of %d: %s:%d",
-               name, *len, filename, *lc);
+        pslLog(PSL_LOG_ERROR, status,
+               "No memory for %s length of %d: %d:%.40s",
+               name, *len, *lc, line);
         return status;
+    }
+
+    /*
+     * Generate the waveform from initial value and increment, typically used to avoid
+     * saving all x-values.
+     */
+    if (match == 3) {
+        for (i = 0; i < *len; i++) {
+            data[i] = start + i * incr;
+        }
+
+        return XIA_SUCCESS;
     }
 
     p = NULL;
@@ -8155,11 +8326,11 @@ PSL_STATIC int psl__ReadDetCharacterizationWave(FILE* dcFile,
 
         if (p == NULL) {
             *lc += 1;
-            p = handel_md_fgets(line, XIA_LINE_LEN, dcFile);
+            p = xia_sio_gets(dcStream, line, XIA_LINE_LEN);
             if (p == NULL) {
                 status = XIA_BAD_FILE_READ;
-                xiaLog(XIA_LOG_ERROR, status, "psl__LoadDetCharacterization",
-                       "Could not read %s values: %s:%d", name, filename, *lc);
+                pslLog(PSL_LOG_ERROR, status,
+                       "Could not read %s values: %d:%.40s", name, *lc, line);
                 return status;
             }
         }
@@ -8179,11 +8350,225 @@ PSL_STATIC int psl__ReadDetCharacterizationWave(FILE* dcFile,
     return status;
 }
 
-PSL_STATIC int psl__LoadDetCharacterization(Detector *detector, Module *module)
+PSL_STATIC int psl__LoadDetCharacterizationF(FalconXNDetector *fDetector, Module *module,
+                                             const char *filename)
 {
+    char newFile[MAXFILENAME_LEN];
+
+    FILE* dcFile;
+
     int status;
 
-    FalconXNDetector* fDetector = detector->pslData;
+    pslLog(PSL_LOG_INFO, "read detector characterization: %s", filename);
+
+    dcFile = xiaFindFile(filename, "rb", newFile);
+
+    if (!dcFile) {
+        return XIA_SUCCESS;
+    }
+
+    struct stat sb;
+    char *detCharacterizationStr;
+
+    if (stat(newFile, &sb) < 0) {
+        pslLog(PSL_LOG_ERROR, XIA_NOT_FOUND, "Could not stat: %s", newFile);
+    }
+
+    detCharacterizationStr = handel_md_alloc((size_t) sb.st_size);
+
+    if (detCharacterizationStr == NULL) {
+        pslLog(PSL_LOG_ERROR, XIA_NOMEM,
+               "No memory when loading detector characterizartion string: %d (%s)",
+               (int) sb.st_size, filename);
+    }
+    else {
+        size_t objsRead;
+
+        memset(detCharacterizationStr, 0, (size_t) sb.st_size);
+
+        objsRead = fread(detCharacterizationStr, (size_t) sb.st_size, 1, dcFile);
+
+        if (objsRead != 1) {
+            pslLog(PSL_LOG_ERROR, XIA_BAD_FILE_READ,
+                   "Could not read: %s", filename);
+            handel_md_free(detCharacterizationStr);
+        }
+    }
+
+    xia_file_close(dcFile);
+
+    status = psl__LoadDetCharacterizationS(fDetector, module, detCharacterizationStr);
+
+    handel_md_free(detCharacterizationStr);
+
+    return status;
+}
+
+PSL_STATIC int psl__LoadDetCharacterizationS(FalconXNDetector *fDetector, Module *module,
+                                             const char *detCharacterizationStr)
+{
+    xia_sio dcStream;
+
+    char line[XIA_LINE_LEN];
+    int lc = 0;
+    char* p;
+    int i;
+
+    int status;
+
+    falconXNClearDetectorCalibrationData(fDetector);
+
+    status = xia_sio_openro(&dcStream, detCharacterizationStr);
+    if (status != XIA_SUCCESS) {
+        pslLog(PSL_LOG_ERROR, status,
+               "Opening buffer to parse detector characterization: %.40s",
+               detCharacterizationStr);
+        return status;
+    }
+
+    ++lc;
+    p = xia_sio_gets(&dcStream, line, XIA_LINE_LEN);
+
+    if (p == NULL) {
+        status = XIA_BAD_FILE_READ;
+        pslLog(PSL_LOG_ERROR, status,
+               "Could not read data length: %d:%.40s", lc, line);
+        return status;
+    }
+
+    if (!STRNEQ(line, "data=")) {
+        status = XIA_BAD_FILE_READ;
+        pslLog(PSL_LOG_ERROR, status,
+               "Could not find data length: %d:%.40s", lc, line);
+        return status;
+    }
+
+    fDetector->calibData.len = atoi(line + sizeof("data=") - 1);
+    fDetector->calibData.data =
+        handel_md_alloc((size_t) fDetector->calibData.len);
+    if (fDetector->calibData.data == NULL) {
+        status = XIA_NOMEM;
+        pslLog(PSL_LOG_ERROR, status,
+               "No memory for data length of %d %d:%.40s",
+               fDetector->calibData.len, lc, line);
+        return status;
+    }
+
+    p = NULL;
+    i = 0;
+    while (i < fDetector->calibData.len) {
+        int value;
+
+        if (p == NULL) {
+            ++lc;
+            p = xia_sio_gets(&dcStream, line, XIA_LINE_LEN);
+            if (p == NULL) {
+                falconXNClearDetectorCalibrationData(fDetector);
+                status = XIA_BAD_FILE_READ;
+                pslLog(PSL_LOG_ERROR, status,
+                       "Could not read data values: %d:%.40s", lc, line);
+                return status;
+            }
+        }
+
+        value = (int) strtol(p, 0, 16);
+
+        if (value > 255) {
+            falconXNClearDetectorCalibrationData(fDetector);
+            status = XIA_BAD_FILE_READ;
+            pslLog(PSL_LOG_ERROR, status,
+                   "Could not parse data value: %d:%.40s", lc, p);
+            return status;
+        }
+
+        fDetector->calibData.data[i] = (uint8_t) value;
+        ++i;
+        p += 3;
+
+        if (strlen(p) < 2)
+            p = NULL;
+    }
+
+    /*
+     * Example waveform.
+     */
+    status = psl__ReadDetCharacterizationWave(&dcStream,
+                                              "example-x",
+                                              &fDetector->calibExample.x,
+                                              &fDetector->calibExample.len,
+                                              &lc);
+    if (status != XIA_SUCCESS) {
+        falconXNClearDetectorCalibrationData(fDetector);
+        return status;
+    }
+    status = psl__ReadDetCharacterizationWave(&dcStream,
+                                              "example-y",
+                                              &fDetector->calibExample.y,
+                                              &fDetector->calibExample.len,
+                                              &lc);
+    if (status != XIA_SUCCESS) {
+        falconXNClearDetectorCalibrationData(fDetector);
+        return status;
+    }
+
+    /*
+     * Model waveform.
+     */
+    status = psl__ReadDetCharacterizationWave(&dcStream,
+                                              "model-x",
+                                              &fDetector->calibModel.x,
+                                              &fDetector->calibModel.len,
+                                              &lc);
+    if (status != XIA_SUCCESS) {
+        falconXNClearDetectorCalibrationData(fDetector);
+        return status;
+    }
+    status = psl__ReadDetCharacterizationWave(&dcStream,
+                                              "model-y",
+                                              &fDetector->calibModel.y,
+                                              &fDetector->calibModel.len,
+                                              &lc);
+    if (status != XIA_SUCCESS) {
+        falconXNClearDetectorCalibrationData(fDetector);
+        return status;
+    }
+
+    /*
+     * Final waveform.
+     */
+    status = psl__ReadDetCharacterizationWave(&dcStream,
+                                              "final-x",
+                                              &fDetector->calibFinal.x,
+                                              &fDetector->calibFinal.len,
+                                              &lc);
+    if (status != XIA_SUCCESS) {
+        falconXNClearDetectorCalibrationData(fDetector);
+        return status;
+    }
+    status = psl__ReadDetCharacterizationWave(&dcStream,
+                                              "final-y",
+                                              &fDetector->calibFinal.y,
+                                              &fDetector->calibFinal.len,
+                                              &lc);
+    if (status != XIA_SUCCESS) {
+        falconXNClearDetectorCalibrationData(fDetector);
+        return status;
+    }
+
+    status = psl__SetCalibration(module, fDetector);
+    if (status != XIA_SUCCESS) {
+        falconXNClearDetectorCalibrationData(fDetector);
+        pslLog(PSL_LOG_ERROR, status,
+               "Error setting the detector characterization");
+        return status;
+    }
+
+    return XIA_SUCCESS;
+}
+
+PSL_STATIC int psl__LoadDetCharacterization(FalconXNDetector *fDetector, Module *module)
+{
+    int status;
 
     char item[MAXITEM_LEN];
     char firmware[MAXITEM_LEN];
@@ -8192,7 +8577,7 @@ PSL_STATIC int psl__LoadDetCharacterization(Detector *detector, Module *module)
     /*
      * Check a firmware set is present for this channel.
      */
-    sprintf(item, "firmware_set_chan%d", psl__DetectorChannel(detector));
+    sprintf(item, "firmware_set_chan%d", fDetector->modDetChan);
 
     /*
      * If there is no detector characterisation data it just means the
@@ -8201,184 +8586,22 @@ PSL_STATIC int psl__LoadDetCharacterization(Detector *detector, Module *module)
 
     status = xiaGetModuleItem(module->alias, item, firmware);
 
-    xiaLog(XIA_LOG_INFO, "psl__LoadDetCharacterization",
-           "module item %s = %s", item, firmware);
+    pslLog(PSL_LOG_INFO, "module item %s = %s", item, firmware);
 
-    if ((status == XIA_SUCCESS) && !STREQ(firmware, "null")) {
+    if (status == XIA_SUCCESS) {
         status = xiaGetFirmwareItem(firmware, 0, "filename", filename);
 
-        if (status == XIA_SUCCESS) {
-            char newFile[MAXFILENAME_LEN];
+        if (status == XIA_SUCCESS && !STREQ(filename, "null")) {
+            status = psl__LoadDetCharacterizationF(fDetector, module, filename);
 
-            FILE* dcFile;
+            if (status == XIA_SUCCESS) {
+                int fStatus;
 
-            xiaLog(XIA_LOG_INFO, "psl__LoadDetCharacterization",
-                   "read detector characterization: %s", filename);
+                fStatus = xiaModifyFirmwareItem(firmware, 0, "filename", "null");
 
-            dcFile = xiaFindFile(filename, "rb", newFile);
-
-            if (dcFile) {
-                char line[XIA_LINE_LEN];
-                int lc = 0;
-                char* p;
-                int i;
-
-                falconXNClearDetectorCalibrationData(fDetector);
-
-                ++lc;
-                p = handel_md_fgets(line, XIA_LINE_LEN, dcFile);
-
-                /* TODO: close the file in this series of error checks */
-
-                if (p == NULL) {
-                    status = XIA_BAD_FILE_READ;
-                    xiaLog(XIA_LOG_ERROR, status, "psl__LoadDetCharacterization",
-                           "Could not read data length: %s:%d", filename, lc);
-                    return status;
+                if (fStatus != XIA_SUCCESS) {
+                    pslLog(PSL_LOG_ERROR, fStatus, "Clearing firmware %s filename", firmware);
                 }
-
-                if (!STRNEQ(line, "data=")) {
-                    status = XIA_BAD_FILE_READ;
-                    xiaLog(XIA_LOG_ERROR, status, "psl__LoadDetCharacterization",
-                           "Could not find data length: %s:%d", filename, lc);
-                    return status;
-                }
-
-                fDetector->calibData.len = atoi(line + sizeof("data=") - 1);
-                fDetector->calibData.data =
-                    handel_md_alloc((size_t) fDetector->calibData.len);
-                if (fDetector->calibData.data == NULL) {
-                    status = XIA_NOMEM;
-                    xiaLog(XIA_LOG_ERROR, status, "psl__LoadDetCharacterization",
-                           "No memory for data length of %d: %s:%d",
-                           fDetector->calibData.len, filename, lc);
-                    return status;
-                }
-
-                p = NULL;
-                i = 0;
-                while (i < fDetector->calibData.len) {
-                    int value;
-
-                    if (p == NULL) {
-                        ++lc;
-                        p = handel_md_fgets(line, XIA_LINE_LEN, dcFile);
-                        if (p == NULL) {
-                            falconXNClearDetectorCalibrationData(fDetector);
-                            status = XIA_BAD_FILE_READ;
-                            xiaLog(XIA_LOG_ERROR, status, "psl__LoadDetCharacterization",
-                                   "Could not read data values: %s:%d", filename, lc);
-                            return status;
-                        }
-                    }
-
-                    value = (int) strtol(p, 0, 16);
-
-                    if (value > 255) {
-                        falconXNClearDetectorCalibrationData(fDetector);
-                        status = XIA_BAD_FILE_READ;
-                        xiaLog(XIA_LOG_ERROR, status, "psl__LoadDetCharacterization",
-                               "Could not parse data value: %s:%d", filename, lc);
-                        return status;
-                    }
-
-                    fDetector->calibData.data[i] = (uint8_t) value;
-                    ++i;
-                    p += 3;
-
-                    if (strlen(p) < 2)
-                        p = NULL;
-                }
-
-                /*
-                 * Example waveform.
-                 */
-                status = psl__ReadDetCharacterizationWave(dcFile,
-                                                          filename,
-                                                          "example-x",
-                                                          &fDetector->calibExample.x,
-                                                          &fDetector->calibExample.len,
-                                                          &lc);
-                if (status != XIA_SUCCESS) {
-                    falconXNClearDetectorCalibrationData(fDetector);
-                    xia_file_close(dcFile);
-                    return status;
-                }
-                status = psl__ReadDetCharacterizationWave(dcFile,
-                                                          filename,
-                                                          "example-y",
-                                                          &fDetector->calibExample.y,
-                                                          &fDetector->calibExample.len,
-                                                          &lc);
-                if (status != XIA_SUCCESS) {
-                    falconXNClearDetectorCalibrationData(fDetector);
-                    xia_file_close(dcFile);
-                    return status;
-                }
-
-                /*
-                 * Model waveform.
-                 */
-                status = psl__ReadDetCharacterizationWave(dcFile,
-                                                          filename,
-                                                          "model-x",
-                                                          &fDetector->calibModel.x,
-                                                          &fDetector->calibModel.len,
-                                                          &lc);
-                if (status != XIA_SUCCESS) {
-                    falconXNClearDetectorCalibrationData(fDetector);
-                    xia_file_close(dcFile);
-                    return status;
-                }
-                status = psl__ReadDetCharacterizationWave(dcFile,
-                                                          filename,
-                                                          "model-y",
-                                                          &fDetector->calibModel.y,
-                                                          &fDetector->calibModel.len,
-                                                          &lc);
-                if (status != XIA_SUCCESS) {
-                    falconXNClearDetectorCalibrationData(fDetector);
-                    xia_file_close(dcFile);
-                    return status;
-                }
-
-                /*
-                 * Final waveform.
-                 */
-                status = psl__ReadDetCharacterizationWave(dcFile,
-                                                          filename,
-                                                          "final-x",
-                                                          &fDetector->calibFinal.x,
-                                                          &fDetector->calibFinal.len,
-                                                          &lc);
-                if (status != XIA_SUCCESS) {
-                    falconXNClearDetectorCalibrationData(fDetector);
-                    xia_file_close(dcFile);
-                    return status;
-                }
-                status = psl__ReadDetCharacterizationWave(dcFile,
-                                                          filename,
-                                                          "final-y",
-                                                          &fDetector->calibFinal.y,
-                                                          &fDetector->calibFinal.len,
-                                                          &lc);
-                if (status != XIA_SUCCESS) {
-                    falconXNClearDetectorCalibrationData(fDetector);
-                    xia_file_close(dcFile);
-                    return status;
-                }
-
-                xia_file_close(dcFile);
-
-                status = psl__SetCalibration(module, detector);
-                if (status != XIA_SUCCESS) {
-                    falconXNClearDetectorCalibrationData(fDetector);
-                    xiaLog(XIA_LOG_ERROR, status, "psl__LoadDetCharacterization",
-                           "Error setting the detector characterization");
-                    return status;
-                }
-
-                status = XIA_SUCCESS;
             }
         }
     }
@@ -8390,12 +8613,11 @@ PSL_STATIC int psl__LoadDetCharacterization(Detector *detector, Module *module)
  * Set the SINC histogram mode from pixel_advance_mode for mapping
  * mode pixel control.
  */
-PSL_STATIC int psl__SyncPixelAdvanceMode(Module *module, Detector *detector)
+PSL_STATIC int psl__SyncPixelAdvanceMode(Module *module, FalconXNDetector *fDetector)
 {
     int status;
     const char *mode;
     acqValue pixel_advance_mode;
-    FalconXNDetector *fDetector = detector->pslData;
 
     pixel_advance_mode = psl__GetAcqValue(fDetector, "pixel_advance_mode");
 
@@ -8414,7 +8636,7 @@ PSL_STATIC int psl__SyncPixelAdvanceMode(Module *module, Detector *detector)
         return status;
     }
 
-    status = psl__SetHistogramMode(module, detector, mode);
+    status = psl__SetHistogramMode(module, fDetector->modDetChan, mode);
     return status;
 }
 
@@ -8422,12 +8644,11 @@ PSL_STATIC int psl__SyncPixelAdvanceMode(Module *module, Detector *detector)
  * Set the SINC histogram mode from preset_type for MCA mode preset
  * runs.
  */
-PSL_STATIC int psl__SyncPresetType(Module *module, Detector *detector)
+PSL_STATIC int psl__SyncPresetType(Module *module, FalconXNDetector *fDetector)
 {
     int status;
     const char *mode;
     acqValue preset_type;
-    FalconXNDetector *fDetector = detector->pslData;
 
     preset_type = psl__GetAcqValue(fDetector, "preset_type");
 
@@ -8451,23 +8672,23 @@ PSL_STATIC int psl__SyncPresetType(Module *module, Detector *detector)
         return status;
     }
 
-    status = psl__SetHistogramMode(module, detector, mode);
+    status = psl__SetHistogramMode(module, fDetector->modDetChan, mode);
     return status;
 }
 
 /*
  * Set the SINC histogram mode to a given mode.
  */
-PSL_STATIC int psl__SetHistogramMode(Module *module, Detector *detector, const char *mode)
+PSL_STATIC int psl__SetHistogramMode(Module *module, int modChan, const char *mode)
 {
     int status;
     SiToro__Sinc__KeyValue kv;
 
     si_toro__sinc__key_value__init(&kv);
     kv.key = (char*) "histogram.mode";
-    kv.optionval = (char*) mode;
+    falconXNSetSincKeyValue(&kv, mode);
 
-    status = psl__SetParam(module, detector, &kv);
+    status = psl__SetParam(module, modChan, &kv);
     if (status != XIA_SUCCESS) {
         pslLog(PSL_LOG_ERROR, status,
                "Unable to set the histogram mode: %s", mode);
@@ -8480,22 +8701,21 @@ PSL_STATIC int psl__SetHistogramMode(Module *module, Detector *detector, const c
 /*
  * Set the SINC histogram refresh rate from mca_refresh for an MCA run.
  */
-PSL_STATIC int psl__SyncMCARefresh(Module *module, Detector *detector)
+PSL_STATIC int psl__SyncMCARefresh(Module *module, FalconXNDetector *fDetector)
 {
     int status;
     acqValue mca_refresh;
-    FalconXNDetector *fDetector = detector->pslData;
 
     mca_refresh = psl__GetAcqValue(fDetector, "mca_refresh");
 
-    status = psl__SetMCARefresh(module, detector, mca_refresh.ref.f);
+    status = psl__SetMCARefresh(module, fDetector->modDetChan, mca_refresh.ref.f);
     return status;
 }
 
 /*
  * SINC histogram.refreshRate setter.
  */
-PSL_STATIC int psl__SetMCARefresh(Module *module, Detector *detector, double period)
+PSL_STATIC int psl__SetMCARefresh(Module *module, int modChan, double period)
 {
     int status;
     SiToro__Sinc__KeyValue kv;
@@ -8505,7 +8725,7 @@ PSL_STATIC int psl__SetMCARefresh(Module *module, Detector *detector, double per
     kv.has_floatval = TRUE_;
     kv.floatval = period;
 
-    status = psl__SetParam(module, detector, &kv);
+    status = psl__SetParam(module, modChan, &kv);
     if (status != XIA_SUCCESS) {
         pslLog(PSL_LOG_ERROR, status,
                "Unable to set the histogram refresh rate");
@@ -8520,19 +8740,15 @@ PSL_STATIC int psl__SetMCARefresh(Module *module, Detector *detector, double per
  * Pass -1 for a parameter to look it up from the default. This allows
  * calling with one known updated value (being set).
  */
-PSL_STATIC int psl__SyncNumberMCAChannels(Module *module, Detector *detector,
+PSL_STATIC int psl__SyncNumberMCAChannels(Module *module, FalconXNDetector *fDetector,
                                           int64_t number_mca_channels,
                                           int64_t mca_start_channel)
 {
-    FalconXNDetector *fDetector;
-
     int64_t highIndex;
 
     SiToro__Sinc__KeyValue kv;
 
     int status;
-
-    fDetector = detector->pslData;
 
     if (number_mca_channels == -1)
         number_mca_channels = psl__GetAcqValue(fDetector, "number_mca_channels").ref.i;
@@ -8546,7 +8762,7 @@ PSL_STATIC int psl__SyncNumberMCAChannels(Module *module, Detector *detector,
     kv.has_intval = TRUE_;
     kv.intval = highIndex;
 
-    status = psl__SetParam(module, detector, &kv);
+    status = psl__SetParam(module, fDetector->modDetChan, &kv);
     if (status != XIA_SUCCESS) {
         pslLog(PSL_LOG_ERROR, status,
                "Unable to set the histogram region high index");
@@ -8559,18 +8775,14 @@ PSL_STATIC int psl__SyncNumberMCAChannels(Module *module, Detector *detector,
 /*
  * Combine XMAP-style gate collection values into one SINC param for mapping mode.
  */
-PSL_STATIC int psl__SyncGateCollectionMode(Module *module, Detector *detector)
+PSL_STATIC int psl__SyncGateCollectionMode(Module *module, FalconXNDetector *fDetector)
 {
     acqValue input_logic_polarity;
     acqValue gate_ignore;
 
-    FalconXNDetector *fDetector;
-
     SiToro__Sinc__KeyValue kv;
 
     int status;
-
-    fDetector = detector->pslData;
 
     input_logic_polarity = psl__GetAcqValue(fDetector, "input_logic_polarity");
     gate_ignore = psl__GetAcqValue(fDetector, "gate_ignore");
@@ -8580,18 +8792,18 @@ PSL_STATIC int psl__SyncGateCollectionMode(Module *module, Detector *detector)
 
     if (input_logic_polarity.ref.i == XIA_GATE_COLLECT_LO) {
         if (gate_ignore.ref.i == 1)
-            kv.optionval = (char*) "risingEdge";
+            falconXNSetSincKeyValue(&kv, "risingEdge");
         else
-            kv.optionval = (char*) "whenLow";
+            falconXNSetSincKeyValue(&kv, "whenLow");
     }
     else { /* XIA_GATE_COLLECT_HI */
         if (gate_ignore.ref.i == 1)
-            kv.optionval = (char*) "fallingEdge";
+            falconXNSetSincKeyValue(&kv, "fallingEdge");
         else
-            kv.optionval = (char*) "whenHigh";
+            falconXNSetSincKeyValue(&kv, "whenHigh");
     }
 
-    status = psl__SetParam(module, detector, &kv);
+    status = psl__SetParam(module, fDetector->modDetChan, &kv);
     if (status != XIA_SUCCESS) {
         pslLog(PSL_LOG_ERROR, status,
                "Unable to set the gate collection mode");
@@ -8604,18 +8816,14 @@ PSL_STATIC int psl__SyncGateCollectionMode(Module *module, Detector *detector)
 /*
  * Combine XMAP-style gate collection values into one SINC param for MCA mode GATE veto.
  */
-PSL_STATIC int psl__SyncGateVetoMode(Module *module, Detector *detector)
+PSL_STATIC int psl__SyncGateVetoMode(Module *module, FalconXNDetector *fDetector)
 {
     acqValue input_logic_polarity;
     acqValue gate_ignore;
 
-    FalconXNDetector *fDetector;
-
     SiToro__Sinc__KeyValue kv;
 
     int status;
-
-    fDetector = detector->pslData;
 
     if (!fDetector->features.mcaGateVeto) {
         pslLog(PSL_LOG_INFO, "gate.veto is not supported by the connected firmware. Ignoring.");
@@ -8629,17 +8837,17 @@ PSL_STATIC int psl__SyncGateVetoMode(Module *module, Detector *detector)
     kv.key = (char*) "gate.veto";
 
     if (gate_ignore.ref.i == 1) {
-        kv.optionval = (char*) "off";
+        falconXNSetSincKeyValue(&kv, "off");
     }
     else {
         /* The veto value is the opposite of "active when". */
         if (input_logic_polarity.ref.i == XIA_GATE_COLLECT_LO)
-            kv.optionval = (char*) "whenHigh";
+            falconXNSetSincKeyValue(&kv, "whenHigh");
         else
-            kv.optionval = (char*) "whenLow";
+            falconXNSetSincKeyValue(&kv, "whenLow");
     }
 
-    status = psl__SetParam(module, detector, &kv);
+    status = psl__SetParam(module, fDetector->modDetChan, &kv);
     if (status != XIA_SUCCESS) {
         pslLog(PSL_LOG_ERROR, status,
                 "Unable to set the gate veto mode.");
@@ -8654,15 +8862,11 @@ PSL_STATIC int psl__SyncGateVetoMode(Module *module, Detector *detector)
  * pixel advance are incompatible. Clear the gate veto before any
  * mapping mode run.
  */
-PSL_STATIC int psl__ClearGateVetoMode(Module *module, Detector *detector)
+PSL_STATIC int psl__ClearGateVetoMode(Module *module, FalconXNDetector *fDetector)
 {
-    FalconXNDetector *fDetector;
-
     SiToro__Sinc__KeyValue kv;
 
     int status;
-
-    fDetector = detector->pslData;
 
     if (!fDetector->features.mcaGateVeto) {
         pslLog(PSL_LOG_INFO, "gate.veto is not supported by the connected firmware. Ignoring.");
@@ -8671,9 +8875,9 @@ PSL_STATIC int psl__ClearGateVetoMode(Module *module, Detector *detector)
 
     si_toro__sinc__key_value__init(&kv);
     kv.key = (char*) "gate.veto";
-    kv.optionval = (char*) "off";
+    falconXNSetSincKeyValue(&kv, "off");
 
-    status = psl__SetParam(module, detector, &kv);
+    status = psl__SetParam(module, fDetector->modDetChan, &kv);
     if (status != XIA_SUCCESS) {
         pslLog(PSL_LOG_ERROR, status,
                 "Unable to set the gate veto mode.");
@@ -8688,7 +8892,7 @@ PSL_STATIC int psl__BoardOp_Apply(int detChan, Detector* detector, Module* modul
 {
     int status = XIA_SUCCESS;
 
-    int channel = xiaGetModDetectorChan(detChan);
+    int channel = xiaGetModChan(detChan);
 
     uint8_t    pad[256];
     SincBuffer packet = SINC_BUFFER_INIT(pad);
@@ -8696,11 +8900,9 @@ PSL_STATIC int psl__BoardOp_Apply(int detChan, Detector* detector, Module* modul
     Sinc_Response response;
     SiToro__Sinc__CheckParamConsistencyResponse* resp = NULL;
 
-    UNUSED(detChan);
+    UNUSED(detector);
     UNUSED(name);
     UNUSED(value);
-
-    xiaPSLBadArgs(module, detector, "psl__BoardOp_Apply");
 
     pslLog(PSL_LOG_INFO, "Checking params consistency for detChan %d", detChan);
 
@@ -8717,40 +8919,38 @@ PSL_STATIC int psl__BoardOp_Apply(int detChan, Detector* detector, Module* modul
     response.type = SI_TORO__SINC__MESSAGE_TYPE__CHECK_PARAM_CONSISTENCY_RESPONSE;
 
     status = psl__ModuleTransactionReceive(module, &response);
-    if (status != XIA_SUCCESS) {
-        return status;
+    if (status == XIA_SUCCESS) {
+        resp = response.response;
+
+        if (resp->has_healthy && !resp->healthy) {
+            status = XIA_BAD_VALUE;
+            pslLog(PSL_LOG_ERROR, status, "Params not healthy");
+        }
+
+        if (resp->badkey != NULL) {
+            status = XIA_BAD_VALUE;
+            pslLog(PSL_LOG_ERROR, status, "Bad key: %s", resp->badkey);
+        }
+
+        if (resp->message != NULL) {
+            status = XIA_BAD_VALUE;
+            pslLog(PSL_LOG_ERROR, status, "Check param consistency: %s", resp->message);
+        }
     }
 
-    resp = response.response;
+    psl__ModuleTransactionEnd(module);
 
-    if (resp->has_healthy && !resp->healthy) {
-        status = XIA_BAD_VALUE;
-        pslLog(PSL_LOG_ERROR, status, "Params not healthy");
-    }
-
-    if (resp->badkey != NULL) {
-        status = XIA_BAD_VALUE;
-        pslLog(PSL_LOG_ERROR, status, "Bad key: %s", resp->badkey);
-    }
-
-    if (resp->message != NULL) {
-        status = XIA_BAD_VALUE;
-        pslLog(PSL_LOG_ERROR, status, "Check param consistency: %s", resp->message);
-    }
-
-	psl__ModuleTransactionEnd(module);
-
-    return XIA_SUCCESS;;
+    return status;;
 }
 
 PSL_STATIC int psl__BoardOp_BufferDone(int detChan, Detector* detector, Module* module,
                                        const char *name, void *value)
 {
     UNUSED(detChan);
+    UNUSED(detector);
+    UNUSED(module);
     UNUSED(name);
     UNUSED(value);
-
-    xiaPSLBadArgs(module, detector, "psl__BoardOp_BufferDone");
 
     /*
      * This is handled by the xiaGetRunData call. This lets the API get the
@@ -8764,16 +8964,33 @@ PSL_STATIC int psl__BoardOp_MappingPixelNext(int detChan, Detector* detector,
                                              const char *name, void *value)
 {
     UNUSED(detChan);
+    UNUSED(detector);
+    UNUSED(module);
     UNUSED(name);
     UNUSED(value);
-
-    xiaPSLBadArgs(module, detector, "psl__BoardOp_MappingPixelNext");
 
     /*
      * This is handled by the xiaGetRunData call. This lets the API get the
      * required data.
      */
     return xiaGetRunData(detChan, name, value);
+}
+
+PSL_STATIC int psl__BoardOp_GetBoardFeatures(int detChan, Detector* detector,
+                                             Module* module,
+                                             const char *name, void *value)
+{
+    unsigned long *features = (unsigned long *)value;
+    FalconXNDetector* fDetector = psl__FindDetector(module, xiaGetModChan(detChan));
+
+    UNUSED(detector);
+    UNUSED(name);
+
+    *features = BOARD_SUPPORTS_NO_EXTRA_FEATURES;
+    if (fDetector->features.termination50ohm) *features |= 1L << BOARD_SUPPORTS_TERMINATAION_50OHM;
+    if (fDetector->features.attenuationGround) *features |= 1L << BOARD_SUPPORTS_ATTENUATION_GROUND;
+
+    return XIA_SUCCESS;
 }
 
 /* This is a clunky API and perhaps should be split out completely
@@ -8792,10 +9009,9 @@ PSL_STATIC int psl__BoardOp_GetBoardInfo(int detChan, Detector* detector, Module
     size_t i;
 
     UNUSED(detChan);
+    UNUSED(detector);
     UNUSED(name);
     UNUSED(value);
-
-    xiaPSLBadArgs(module, detector, "psl__BoardOp_GetBoardInfo");
 
     /*
      * The board info is an array of characters with the following fields:
@@ -8878,6 +9094,22 @@ PSL_STATIC int psl__BoardOp_GetBoardInfo(int detChan, Detector* detector, Module
     return XIA_SUCCESS;
 }
 
+PSL_STATIC boolean_t psl__GetCalibrated(Module* module, FalconXNDetector* fDetector)
+{
+    int status;
+
+    if (fDetector->calibrationState == CalibrationNeedRefresh) {
+        status = psl__UpdateCalibration(module, fDetector);
+        if (status != XIA_SUCCESS) {
+            pslLog(PSL_LOG_ERROR, status, "Refresh calibration: %s channel %d",
+                    module->alias, fDetector->modDetChan);
+        }
+    }
+
+    return fDetector->calibrationState == CalibrationReady;
+}
+
+
 PSL_STATIC int psl__BoardOp_GetConnected(int detChan, Detector* detector, Module* module,
                                          const char *name, void *value)
 {
@@ -8889,11 +9121,10 @@ PSL_STATIC int psl__BoardOp_GetConnected(int detChan, Detector* detector, Module
     int*            connected = (int*) value;
 
     UNUSED(detChan);
+    UNUSED(detector);
     UNUSED(name);
 
     ASSERT(value);
-
-    xiaPSLBadArgs(module, detector, "psl__BoardOp_GetConnected");
 
     fModule = module->pslData;
 
@@ -8930,11 +9161,10 @@ PSL_STATIC int psl__BoardOp_GetChannelCount(int detChan, Detector* detector, Mod
     SiToro__Sinc__KeyValue*         kv;
 
     UNUSED(detChan);
+    UNUSED(detector);
     UNUSED(name);
 
     ASSERT(value);
-
-    xiaPSLBadArgs(module, detector, "psl__BoardOp_GetChannelCount");
 
     fModule = module->pslData;
 
@@ -8978,11 +9208,10 @@ PSL_STATIC int psl__BoardOp_GetSerialNumber(int detChan, Detector* detector, Mod
     char*                           serialNum = (char *)value;
 
     UNUSED(detChan);
+    UNUSED(detector);
     UNUSED(name);
 
     ASSERT(value);
-
-    xiaPSLBadArgs(module, detector, "psl__BoardOp_GetSerialNumber");
 
     fModule = module->pslData;
 
@@ -9023,11 +9252,10 @@ PSL_STATIC int psl__BoardOp_GetFirmwareVersion(int detChan, Detector* detector, 
     SiToro__Sinc__KeyValue*         kv;
 
     UNUSED(detChan);
+    UNUSED(detector);
     UNUSED(name);
 
     ASSERT(value);
-
-    xiaPSLBadArgs(module, detector, "psl__BoardOp_GetFirmwareVersion");
 
     fModule = module->pslData;
 

@@ -50,49 +50,6 @@ typedef struct {
     double b;
 } AcqNameValues;
 
-static const AcqNameValues falconx_values[] =
-    {
-        { "analog_offset", 1, 31000 },
-        { "analog_gain", 1, 31000 },
-        { "analog_gain_boost", 0, 1 },
-        { "invert_input", 1, 0 },
-        { "disable_input", 1, 0 },
-        { "detector_polarity", 0, 1 },
-        { "analog_discharge", 0, 1 },
-        { "analog_discharge_threshold", 0, 1 },
-        { "dc_offset", -0.001, 0.5 },
-        { "dc_tracking_mode", 0, 1 },
-        { "operating_mode", 0, 1 },
-        { "operating_mode_target", 0, 1 },
-        { "reset_blanking_enable", 0, 1 },
-        { "reset_blanking_threshold", 0, 1 },
-        { "reset_blanking_presamples", 0, 1 },
-        { "reset_blanking_postsamples", 0, 1 },
-        { "min_pulse_pair_separation", 0, 1 },
-        { "detection_threshold", 0, 1 },
-        { "validator_threshold_fixed", 0, 1 },
-        { "validator_threshold_proport", 0, 1 },
-        { "pulse_scale_factor", 0.01, 0.1 },
-        { "cal_noise_floor", 0, 1 },
-        { "cal_min_pulse_amp", 0, 1 },
-        { "cal_max_pulse_amp", 0, 1 },
-        { "cal_source_type", 0, 1 },
-        { "cal_pulses_needed", 10, 10000 },
-        { "cal_filter_cutoff", 0.1, 0.5 },
-        { "mapping_mode", 0, 1 },
-        { "preset_type", 0, 4 },
-        { "preset_value", 0, 1 },
-        { "preset_baseline", 0, 1 },
-        { "hist_bin_count", 1024, 8192 },
-        { "number_mca_channels", 1024, 8192 },
-        { "preamp_gain", 1, 10 },
-        { "dynamic_range", 30, 50 },
-        { "adc_percent_rule", 10, 30 },
-        { "calibration_energy", 3, 8 },
-        { "mca_bin_width", 5, 20 },
-        { NULL, 0, 0 }
-    };
-
 static const AcqNameValues falconxn_values[] =
     {
         { "analog_gain", 15.887, 1 },
@@ -188,11 +145,13 @@ int main(int argc, char *argv[])
     status = xiaGetModuleItem("module1", "number_of_channels", &channels);
     CHECK_ERROR(status);
 
-    if (strcmp(module_type, "falconx") == 0) {
-        values = falconx_values;
-    }
-    else if (strcmp(module_type, "falconxn") == 0) {
+    if (strcmp(module_type, "falconxn") == 0) {
         values = falconxn_values;
+    }
+    else {
+        printf("Unrecognized module type: %s\n", module_type);
+        xiaExit();
+        exit(2);
     }
 
     for (channel = 0; channel < channels; ++channel) {

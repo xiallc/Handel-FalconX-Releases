@@ -87,7 +87,7 @@ XIA_SHARED int dxp_md_wait(float *time)
 #else
     struct timespec req = {
       .tv_sec = (time_t) *time,
-      .tv_nsec = (time_t) ((*time) * 1000000000.0)
+      .tv_nsec = (time_t) (((double) *time) * 1000000000.0)
     };
     struct timespec rem = {
       .tv_sec = 0,
@@ -103,8 +103,12 @@ XIA_SHARED int dxp_md_wait(float *time)
 }
 
 
-/** @brief Safe version of fgets() that can handle both UNIX and DOS
+/*
+ * Safe version of fgets() that can handle both UNIX and DOS
  * line-endings.
+ *
+ * length is the size of the buffer s. fgets will read at most
+ * length-1 characters and add a null terminator.
  *
  * If the trailing two characters are '\\r' + \n', they are replaced by a
  * single '\n'.
@@ -121,7 +125,7 @@ XIA_SHARED char * dxp_md_fgets(char *s, int length, FILE *stream)
     ASSERT(length > 0);
 
 
-    cstatus = fgets(s, length - 1, stream);
+    cstatus = fgets(s, length, stream);
 
     if (!cstatus) {
         if (ferror(stream)) {
@@ -140,16 +144,6 @@ XIA_SHARED char * dxp_md_fgets(char *s, int length, FILE *stream)
         s[ret_len - 2] = '\n';
         s[ret_len - 1] = '\0';
     }
-
-
-    /*
-     * Remove the new line character to keep the log file output from
-     * containing the extra white space.
-     */
-    if (s[ret_len - 2] == '\n')
-      s[ret_len - 2] = '\0';
-    if (s[ret_len - 1] == '\n')
-      s[ret_len - 1] = '\0';
 
     return s;
 }

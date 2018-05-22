@@ -490,7 +490,11 @@ int SincSocketBindDatagram(int *datagramFd, int *port)
     addr.sin_addr.s_addr = INADDR_ANY; // Bind on the local host.
     if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0)
     {
-        close(fd);
+#ifndef _WIN32
+		close(fd);
+#else
+		closesocket(fd);
+#endif
         return SI_TORO__SINC__ERROR_CODE__OUT_OF_RESOURCES;
     }
 
@@ -498,8 +502,12 @@ int SincSocketBindDatagram(int *datagramFd, int *port)
     addrLen = sizeof(addr);
     if (getsockname(fd, (struct sockaddr *)&addr, &addrLen) < 0)
     {
-        close(fd);
-        return SI_TORO__SINC__ERROR_CODE__OUT_OF_RESOURCES;
+#ifndef _WIN32
+		close(fd);
+#else
+		closesocket(fd);
+#endif
+		return SI_TORO__SINC__ERROR_CODE__OUT_OF_RESOURCES;
     }
 
     // Return results.

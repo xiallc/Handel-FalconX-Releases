@@ -51,7 +51,7 @@
 #include "md_generic.h"
 
 
-static void do_tests();
+static void do_tests(void);
 static void SEC_SLEEP(float *time);
 static void CHECK_ERROR(int status);
 
@@ -119,7 +119,7 @@ int main(int argc, char** argv)
     return 0;
 }
 
-static void do_tests()
+static void do_tests(void)
 {
     int       status;
 
@@ -267,7 +267,7 @@ static void SEC_SLEEP(float *time)
     unsigned long secs = (unsigned long) *time;
     struct timespec req = {
       .tv_sec = (time_t) secs,
-      .tv_nsec = (time_t) ((*time - secs) * 1000000000.0)
+      .tv_nsec = (time_t) ((*time - secs) * 1000000000.0f)
     };
     struct timespec rem = {
       .tv_sec = 0,

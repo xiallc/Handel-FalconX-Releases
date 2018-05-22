@@ -18,14 +18,13 @@ if not os.getenv('WAFLOCK'):
 def options(opt):
     opt.add_option('--autoconfigure', action='callback', callback=set_autoconfigure,
                    help='Call configure automatically when needed.')
-    opt.add_option('--sitoro', action='store', dest='sitoro_path', default='',
-                   help='Set the path to the SiToro release.')
     opt.add_option('--release', action='store_true', dest='releasing', default=False,
                    help='Update xia_version.h with version control info.')
     opt.add_option('--show-commands', action='store_true', dest='show_commands', default=False,
                    help='Print the commands as strings.')
+    opt.add_option('--memory-leak-test', action='store_true', dest='memory_test', default=False,
+                   help='Build memory leak test program with VLD library.')
     opt.load('compiler_c')
-
 
 #
 # Configure the variants.
@@ -36,11 +35,6 @@ def configure(conf):
     # Provide a way for the user to get the full traditional output.
     #
     conf.env.SHOW_COMMANDS = 'yes' if conf.options.show_commands else 'no'
-
-    #
-    # Check the user's sitoro option and, if set, get the use variables.
-    #
-    conf.read_sitoro()
 
     #
     # Find ruby. Configure our version script.
@@ -59,10 +53,6 @@ def configure(conf):
         # We needed 12+ for C99-style inline initializers, now 14 for snprintf.
         conf.env['MSVC_VERSIONS'] = ['msvc 14.0']
 
-        # Force x86 for linking with the DLL
-        if 'LIB_sitoro' in conf.env:
-            conf.env['MSVC_TARGETS'] = ['x86']
-
     #
     # Get the flags.
     #
@@ -71,6 +61,7 @@ def configure(conf):
     if windows:
         # Make winsock available to 'use'
         conf.check_cc(lib='ws2_32')
+        conf.read_vld()
     else:
         flags = append_flags(flags, 'lib', ['m'])
 
@@ -84,6 +75,7 @@ def configure(conf):
 
         conf.env.CFLAGS = flags['cflags'][name]
         conf.env.WARNINGS = flags['warnings'][name]
+        conf.env.NO_WARNINGS = flags['no-warnings'][name]
         conf.env.LINKFLAGS = flags['linkflags'][name]
         conf.env.LIB = flags['lib'][name]
         conf.env.LIBPATH = flags['libpath'][name]
@@ -129,41 +121,42 @@ def build(bld):
 
     defines = ['HANDEL_MAKE_DLL=1']
     if windows:
-        defines += ['_CRT_SECURE_NO_WARNINGS', 'WIN32']
+        defines += ['_CRT_SECURE_NO_WARNINGS',
+                    'WIN32',
+                    'WIN32_LEAN_AND_MEAN'] # Avoid winsock2.h/windows.h order issues.
 
-    includes = ['.', 'inc', 'libsinc-c']
+    includes = ['.', 'inc', 'libsinc-c', 'miniz']
+    use = ['sinc', 'miniz', 'xia_version.h']
+
+    if bld.options.memory_test:
+        use += ['VLD']
 
     bld.env.GVER_FLAGS = '--release' if bld.options.releasing else ''
     bld(rule      = '${RUBY} ${GVER} ${GVER_FLAGS} ${SRC} ${TGT}',
         target   = 'xia_version.h',
         source   = 'tools/releaser/version.yml')
 
-    if 'LIB_sitoro' in bld.env:
-        bld.install_files('${BINDIR}', ['bin/sitoro-3.dll', 'bin/libusb-1.0.dll'],
-                          cwd=bld.root.find_dir(bld.env.SITORO_PATH))
-    else:
-        # Build the stub if we didn't get sitoro from the command line.
-        bld(features = 'c cshlib',
-            name     = 'sitoro',
-            target   = 'sitoro-3',
-            source   = [src + 'sitoro-stub.c'],
-            defines  = defines + ['SITORO_EXPORTS'],
-            includes = includes)
+    bld(features = 'c cstlib',
+        target   = 'miniz',
+        source   = ['miniz/miniz.c'],
+        defines  = defines,
+        cflags   = bld.env['WARNINGS'] + bld.env['NO_WARNINGS'] ,
+        includes = includes)
 
     bld(features = 'c cstlib',
         target   = 'sinc',
-        source = [sinc_src + 'api.c',
-                  sinc_src + 'blocking.c',
-                  sinc_src + 'command.c',
-                  sinc_src + 'decode.c',
-                  # sinc_src + 'discovery.c',
-                  sinc_src + 'encapsulation.c',
-                  sinc_src + 'encode.c',
-                  sinc_src + 'readmessage.c',
-                  sinc_src + 'request.c',
-                  sinc_src + 'sinc.pb-c.c',
-                  sinc_src + 'socket.c',
-                  sinc_src + 'protobuf-c.c'],
+        source   = [sinc_src + 'api.c',
+                    sinc_src + 'blocking.c',
+                    sinc_src + 'command.c',
+                    sinc_src + 'decode.c',
+                    # sinc_src + 'discovery.c',
+                    sinc_src + 'encapsulation.c',
+                    sinc_src + 'encode.c',
+                    sinc_src + 'readmessage.c',
+                    sinc_src + 'request.c',
+                    sinc_src + 'sinc.pb-c.c',
+                    sinc_src + 'socket.c',
+                    sinc_src + 'protobuf-c.c'],
         defines  = defines,
         includes = includes,
         use      = sockets)
@@ -175,6 +168,7 @@ def build(bld):
                     src + 'handel_dyn_detector.c',
                     src + 'handel_dyn_module.c',
                     src + 'handel_file.c',
+                    sinc_src + 'base64.c',
                     src + 'handel_run_params.c',
                     src + 'handel_system.c',
                     src + 'handel_dbg.c',
@@ -187,15 +181,33 @@ def build(bld):
                     src + 'xia_assert.c',
                     src + 'xia_file.c',
                     src + 'md_shim.c',
+                    src + 'xia_sio.c',
                     src + 'falconx_mm.c',
-                    src + 'falconx_psl.c',
                     src + 'falconxn_psl.c',
                     src + 'psl.c'] + threads,
         cflags = bld.env['WARNINGS'],
         defines  = defines,
         includes = includes,
-        use      = ['sitoro', 'sinc', 'xia_version.h'])
+        use      = use)
 
+    # Memory leak test build
+    if bld.options.memory_test:
+        bld(features = 'cprogram c',
+            target   = 'handel_memory_leak_test',
+            source   = 'tests/memory_leak_test/memory_leak_test.c',
+            cflags   = bld.env['WARNINGS'],
+            defines  = defines,
+            includes = includes,
+            use = ['VLD', 'handel'])
+
+        # Copy VLD redist files
+        for f in bld.path.find_dir(bld.env.VLD_BIN).ant_glob("*"):
+            bld(features = "subst",
+                source = f.bldpath(),
+                target = os.path.basename(f.srcpath()),
+                is_copy = True)
+
+    # Standard C tests
     tests = ['hd-board-info',
              'hd-serial-num',
              'hd-det-characterize',
@@ -258,6 +270,7 @@ def cc_get_flags(ctx):
 
     pcf = []
     pcw = ['-Wall']
+    pcnw = []
     plf = []
     plib = []
     plp = []
@@ -279,11 +292,24 @@ def cc_get_flags(ctx):
                 '-Wno-documentation-unknown-command',
                 '-Wno-float-equal',
                 '-Wno-covered-switch-default']
+        pcnw += ['-Wno-strict-prototypes',
+                 '-Wno-missing-prototypes',
+                 '-Wno-undef',
+                 '-Wno-unused-macros',
+                 '-Wno-#pragma-messages',
+                 '-Wno-comma',
+                 '-Wno-conversion',
+                 '-Wno-sign-conversion',
+                 '-Wno-cast-align',
+                 '-Wno-cast-qual',
+                 '-Wno-switch-enum']
 
     flags = { 'cflags'   : { 'debug'  : common_cflags + ['-g', '-O0'] + pcf,
                              'release': common_cflags + ['-O2'] + pcf },
               'warnings' : { 'debug'  : pcw,
-                             'release': pcw },
+                             'release': pcnw },
+              'no-warnings' : { 'debug'  : pcnw,
+                                'release': pcw },
               'linkflags': { 'debug'  : ['-g'] + plf,
                              'release': [] + plf },
               'lib'      :  { 'debug'  : plib,
@@ -303,6 +329,7 @@ def msvc_get_flags(ctx):
         pcfd = ['-g', '-O0']
         pcfr = ['-O2']
         pcw = ['-Wall']
+        pcnw = []
         plf = ['-g', '-w']
         plib = ['m']
         plp = []
@@ -311,6 +338,8 @@ def msvc_get_flags(ctx):
         pcfd = ['/MDd']
         pcfr = ['/MD']
         pcw = ['/W4']
+        pcnw = ['/wd4127', # C4127: conditional expression is constant
+                '/wd4244'] # C4244: 'function': conversion from ... to ... possible loss of data
         plf = ['/MANIFEST', '/nologo', '/DEBUG', '/INCREMENTAL:NO']
         plib = []
 
@@ -321,6 +350,8 @@ def msvc_get_flags(ctx):
                              'release': common_cflags + pcfr },
               'warnings' : { 'debug'  : pcw,
                              'release': pcw },
+              'no-warnings' : { 'debug'  : pcnw,
+                                'release': pcw },
               'linkflags': { 'debug'  : plf,
                              'release': plf },
               'lib'      : { 'debug'  : plib,
@@ -337,41 +368,25 @@ def set_autoconfigure(option, opt, value, parser):
     Configure.autoconfig = True
 
 #
-# Parse the sitoro option and set the cc uselib variables if the library
-# enabled.
-#
-# Usage:
-# bld(features = 'c cshlib',
-#     target   = 'mylib',
-#     source   = ['mylib.c'],
-#     includes = ['inc'], # sitoro.h is patched here
-#     use      = ['sitoro'])
+# Visual Leak Detector configuration, Windows-only
 #
 @Configure.conf
-def read_sitoro(ctx):
-    ctx.start_msg('Checking for sitoro')
-    if len(ctx.options.sitoro_path):
-        if ctx.options.sitoro_path == 'disable':
-            sitoro_path = None
-            ctx.end_msg('disabled')
-        else:
-            sitoro_path = os.path.join(ctx.options.sitoro_path)
-    elif windows:
-        sitoro_path = os.path.join(ctx.srcnode.abspath(), 'redist')
-    else:
-        sitoro_path = None
+def read_vld(conf):
+    if not windows:
+        return
 
-    if sitoro_path is not None:
-        # This isn't a 'use' variable, but we need it for installing the binaries
-        ctx.env.SITORO_PATH = sitoro_path
+    vldpath = '../tools/vld'
+    vldarch = 'Win64' if conf.env['DEST_CPU'] == 'amd64' else 'Win32'
+    vldlib = os.path.join(vldpath, 'lib', vldarch)
 
-        ctx.env.LIB_sitoro = 'sitoro-3'
-        ctx.env.LIBPATH_sitoro = [os.path.join(sitoro_path, 'lib')]
+    conf.check_cc(lib='vld',
+                  includes=os.path.join(vldpath, 'include'),
+                  libpath=os.path.abspath(vldlib),
+                  defines='__VLD_MEM_DBG__',
+                  mandatory=False)
 
-        # OEM INCLUDES are not set since we are still tracking ./inc/sitoro.h.
-        #ctx.env.INCLUDES_sitoro = [os.path.join(sitoro_path, 'include')]
-
-    ctx.end_msg(sitoro_path)
+    if 'LIB_VLD' in conf.env:
+        conf.env.VLD_BIN = os.path.join(vldpath, 'bin', vldarch)
 
 @TaskGen.feature('c', 'cxx')
 @TaskGen.after_method('process_source')
@@ -448,6 +463,9 @@ def output_command_line():
                     self.logger.error('err: %s' % err.decode(sys.stdout.encoding or 'iso8859-1'))
                 return p.returncode
             else:
+                # Nede to convert the Nod3 to a string for subprocess
+                if 'cwd' in kw:
+                    kw['cwd'] = str(kw['cwd'])
                 p = subprocess.Popen(cmd, **kw)
                 return p.wait()
         except OSError:

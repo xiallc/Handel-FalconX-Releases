@@ -553,6 +553,22 @@ int main(int argc, char *argv[])
                     exit(1);
                 }
 
+                status = xiaGetRunData(det,
+                                       buffer_full_str[current[det]],
+                                       &buffer_full[det]);
+
+                if (status != XIA_SUCCESS) {
+                    xiaStopRun(-1);
+                    xiaExit();
+
+                    fprintf(stderr, "Error getting the status of buffer '%c' after buffer_done.\n",
+                            buffer_done_char[current[det]]);
+                    for (det = 0; det < det_channels; ++det)
+                        fclose(fp[det]);
+                    free(buffer);
+                    exit(1);
+                }
+
                 status = xiaGetRunData(det, "current_pixel", &det_current_pixel);
 
                 if (status != XIA_SUCCESS) {
@@ -566,9 +582,10 @@ int main(int argc, char *argv[])
                     exit(1);
                 }
 
-                fprintf(stdout, "Buffer write: det: %d buffer:%d/%c pixel:%lu\n",
+                fprintf(stdout, "Buffer write: det: %d buffer:%d/%c pixel:%lu full:%d\n",
                         det, buffer_number[det],
-                        buffer_done_char[current[det]], det_current_pixel);
+                        buffer_done_char[current[det]], det_current_pixel,
+                        buffer_full[det]);
 
                 if (fwrite(&buffer[0], sizeof(uint32_t),
                            bufferLength, fp[det]) != bufferLength) {

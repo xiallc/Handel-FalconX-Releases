@@ -237,6 +237,39 @@ bool SincReadListParamDetailsResponse(Sinc *sc, int timeout, SiToro__Sinc__ListP
 
 
 /*
+ * NAME:        SincReadSynchronizeLogResponse
+ * ACTION:      Reads a synchronize log response from the device. May or may not wait depending on
+ *              the timeout.
+ * PARAMETERS:  Sinc *sc     - the channel to listen to.
+ *              int timeout  - in milliseconds. 0 to poll. -1 to wait forever.
+ *              SiToro__Sinc__SynchronizeLogResponse **resp - where to put the response received. NULL to not use.
+ *                  This message should be freed with si_toro__sinc__synchronize_log_response__free_unpacked(resp, NULL) after use.
+ * RETURNS:     true on success, false otherwise. On failure use SincErrno() and
+ *                  SincStrError() to get the error status.
+ */
+
+bool SincReadSynchronizeLogResponse(Sinc *sc, int timeout, SiToro__Sinc__SynchronizeLogResponse **resp)
+{
+    uint8_t pad[256];
+    SincBuffer packet = SINC_BUFFER_INIT(pad);
+    int success;
+
+    if (!SincWaitForMessageType(sc, timeout, &packet, SI_TORO__SINC__MESSAGE_TYPE__SYNCHRONIZE_LOG_RESPONSE))
+    {
+        SINC_BUFFER_CLEAR(&packet);
+        return false;
+    }
+
+    success = SincDecodeSynchronizeLogResponse(&sc->readErr, &packet, resp);
+    if (!success)
+        sc->err = &sc->readErr;
+
+    SINC_BUFFER_CLEAR(&packet);
+    return success;
+}
+
+
+/*
  * NAME:        SincReadAsynchronousErrorResponse
  * ACTION:      Reads a get parameters response from the device. May or may not wait depending on
  *              the timeout.
@@ -337,21 +370,19 @@ bool SincPacketPeekMulti(Sinc **channelSet, int numChannels, int timeout, SiToro
     // Check if there's a packet already buffered on any channel.
     for (i = 0; i < numChannels; i++)
     {
-        if (SincPacketPeek(channelSet[i], 0, packetType))
+        // Try to get a message from the read buffer.
+        int packetFound = false;
+        SincGetNextPacketFromBuffer(&channelSet[i]->readBuf, packetType, NULL, &packetFound);
+        if (packetFound)
         {
             // We found a packet.
             *packetChannel = i;
             return true;
         }
-        else if (SincReadErrorCode(channelSet[i]) != SI_TORO__SINC__ERROR_CODE__TIMEOUT)
-        {
-            // Got an error.
-            return false;
-        }
     }
 
     // We need to read more data. Wait on data from any channel.
-    int *fdSet = malloc(sizeof(int) * (size_t)numChannels);
+    int *fdSet = malloc(sizeof(int) * (size_t)numChannels * 2);
     if (fdSet == NULL)
     {
         *packetChannel = 0;
@@ -359,7 +390,15 @@ bool SincPacketPeekMulti(Sinc **channelSet, int numChannels, int timeout, SiToro
         return false;
     }
 
-    bool *readOk = malloc(sizeof(bool) * (size_t)numChannels);
+    int *fdSetToChannel = malloc(sizeof(int) * (size_t)numChannels * 2);
+    if (fdSetToChannel == NULL)
+    {
+        *packetChannel = 0;
+        SincReadErrorSetCode(channelSet[*packetChannel], SI_TORO__SINC__ERROR_CODE__OUT_OF_MEMORY);
+        return false;
+    }
+
+    bool *readOk = malloc(sizeof(bool) * (size_t)numChannels * 2);
     if (readOk == NULL)
     {
         *packetChannel = 0;
@@ -368,8 +407,23 @@ bool SincPacketPeekMulti(Sinc **channelSet, int numChannels, int timeout, SiToro
         return false;
     }
 
+    /* Make the set of fds to watch. */
+    int numFds = 0;
     for (i = 0; i < numChannels; i++)
-        fdSet[i] = channelSet[i]->fd;
+    {
+        /* Add the channel's TCP fd. */
+        fdSet[numFds] = channelSet[i]->fd;
+        fdSetToChannel[numFds] = i;
+        numFds++;
+
+        /* Add the optional UDP fd. */
+        if (channelSet[i]->datagramIsOpen)
+        {
+            fdSet[numFds] = channelSet[i]->datagramFd;
+            fdSetToChannel[numFds] = i;
+            numFds++;
+        }
+    }
 
     while (true)
     {
@@ -381,6 +435,7 @@ bool SincPacketPeekMulti(Sinc **channelSet, int numChannels, int timeout, SiToro
                 *packetChannel = 0;
                 SincReadErrorSetCode(channelSet[i], SI_TORO__SINC__ERROR_CODE__MULTIPLE_THREAD_WAIT);
                 free(fdSet);
+                free(fdSetToChannel);
                 free(readOk);
                 return false;
             }
@@ -392,7 +447,7 @@ bool SincPacketPeekMulti(Sinc **channelSet, int numChannels, int timeout, SiToro
         }
 
         // Wait for network activity.
-        int err = SincSocketWaitMulti(fdSet, numChannels, timeout, readOk);
+        int err = SincSocketWaitMulti(fdSet, numFds, timeout, readOk);
 
         for (i = 0; i < numChannels; i++)
         {
@@ -404,21 +459,24 @@ bool SincPacketPeekMulti(Sinc **channelSet, int numChannels, int timeout, SiToro
             *packetChannel = 0;
             SincReadErrorSetCode(channelSet[*packetChannel], (SiToro__Sinc__ErrorCode)err);
             free(fdSet);
+            free(fdSetToChannel);
             free(readOk);
             return false;
         }
 
         // Check each channel for activity.
-        for (i = 0; i < numChannels; i++)
+        for (i = 0; i < numFds; i++)
         {
             if (readOk[i])
             {
                 // Got something on this channel - poll the channel to try to get a packet.
-                if (SincPacketPeek(channelSet[i], 0, packetType))
+                int channelId = fdSetToChannel[i];
+                if (SincPacketPeek(channelSet[channelId], 0, packetType))
                 {
                     // Got a packet.
-                    *packetChannel = i;
+                    *packetChannel = channelId;
                     free(fdSet);
+                    free(fdSetToChannel);
                     free(readOk);
                     return true;
                 }
@@ -426,6 +484,7 @@ bool SincPacketPeekMulti(Sinc **channelSet, int numChannels, int timeout, SiToro
                 {
                     // Got an error.
                     free(fdSet);
+                    free(fdSetToChannel);
                     free(readOk);
                     return false;
                 }

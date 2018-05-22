@@ -47,6 +47,8 @@
 #define SINGLE        0
 #define SET           1
 
+#define DISABLED_CHANNEL -1
+
 /** Forward declaration. **/
 struct PSLHandlers;
 typedef struct PSLHandlers PSLHandlers;
@@ -64,6 +66,12 @@ typedef struct _Channel {
     unsigned short n_sca;
     unsigned short *sca_lo;
     unsigned short *sca_hi;
+
+     /* Channel state saved in the ini file and parsed by the PSL. */
+    GenBuffer data;
+
+    /* The platform specific layer data. */
+    void *pslData;
 } Channel_t;
 
 
@@ -311,13 +319,6 @@ typedef struct Interface_Inet {
 } Interface_Inet;
 
 /*
- * SiToro Transport.
- */
-typedef struct Interface_SiToro {
-    unsigned int id;
-} Interface_SiToro;
-
-/*
  * Define a struct of linked-lists for the module information
  */
 typedef struct InterfaceTransport {
@@ -331,8 +332,6 @@ typedef struct InterfaceTransport {
      */
     union {
         Interface_Inet   *inet;
-        Interface_SiToro *sitoro;
-
         /* Add other specific interfaces here */
     } info;
 

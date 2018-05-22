@@ -205,7 +205,7 @@ HANDEL_SHARED int HANDEL_API xiaAddDetChan(int type, int detChan, void *data)
                 current->next = masterDetChan;
 
                 xiaLog(XIA_LOG_DEBUG, "xiaAddDetChan",
-                       "(masterDetChan) current->next = %p", current->next);
+                       "(masterDetChan) current->next = %p", (void *)current->next);
 
             } else {
 
@@ -213,7 +213,7 @@ HANDEL_SHARED int HANDEL_API xiaAddDetChan(int type, int detChan, void *data)
             }
 
             xiaLog(XIA_LOG_DEBUG, "xiaAddDetChan",
-                   "masterDetChan = %p", masterDetChan);
+                   "masterDetChan = %p", (void *)masterDetChan);
 
             newSetElem = (DetChanSetElem *)handel_md_alloc(sizeof(DetChanSetElem));
 
@@ -231,7 +231,7 @@ HANDEL_SHARED int HANDEL_API xiaAddDetChan(int type, int detChan, void *data)
             masterTail = xiaGetDetSetTail(masterDetChan->data.detChanSet);
 
             xiaLog(XIA_LOG_DEBUG, "xiaAddDetChan",
-                   "masterTail = %p", masterTail);
+                   "masterTail = %p", (void *)masterTail);
 
             if (masterTail == NULL) {
 

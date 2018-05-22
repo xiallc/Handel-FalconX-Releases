@@ -209,6 +209,47 @@ bool SincSetParams(Sinc *sc, int channelId, SiToro__Sinc__KeyValue *params, int 
 
 
 /*
+ * NAME:        SincSetAllParams
+ * ACTION:      Sets all of the parameters on the device. If any parameters on the
+ *              device aren't set by this command they'll automatically be set to
+ *              sensible defaults. This is useful when loading a project file which
+ *              is intended to set all the values in a single lot. It ensures that
+ *              the device's parameters are upgraded automatically along with any
+ *              firmware upgrades.
+ *
+ *              If a set of saved device parameters are loaded after a firmware
+ *              update using SincSetParams() there may be faulty behavior. This
+ *              Is due to new parameters not being set as they're not defined in
+ *              the set of saved parameters. Using this call instead of
+ *              SincSetParams() when loading a complete device state ensures that
+ *              the device's parameters are upgraded automatically along with any
+ *              firmware upgrades.
+ * PARAMETERS:  Sinc *sc                            - the channel to request from.
+ *              int channelId                       - which channel to use.
+ *              SiToro__Sinc__KeyValue *param       - the key and value to set.
+ *                  Set the key in param->key.
+ *                  Set the value type in param->valueCase and the value in one of intval,
+ *                  floatval, boolval, strval or optionval.
+ *              const char *fromFirmwareVersion     - the instrument.firmwareVersion
+ *                                                    of the saved parameters being
+ *                                                    restored.
+ *
+ * RETURNS:     true on success, false otherwise. On failure use SincCurrentErrorCode() and
+ *                  SincCurrentErrorMessage() to get the error status.
+ */
+
+bool SincSetAllParams(Sinc *sc, int channelId, SiToro__Sinc__KeyValue *params, int numParams, const char *fromFirmwareVersion)
+{
+    // Send the request.
+    if (!SincRequestSetAllParams(sc, channelId, params, numParams, fromFirmwareVersion))
+        return false;
+
+    // Send it.
+    return SincCheckSuccess(sc);
+}
+
+
+/*
  * NAME:        SincStartCalibration
  * ACTION:      Requests a calibration but doesn't wait for it to complete. Use SincCalibrate()
  *              instead to wait for calibration to complete or use SincWaitCalibrationComplete()
@@ -493,7 +534,7 @@ bool SincInitDatagramComms(Sinc *sc)
     if (!SincSetParam(sc, -1, &enableParam))
         return false;
 
-    printf("datagram mode enabled.\n");
+    //printf("datagram mode enabled.\n");
     return true;
 }
 
@@ -849,4 +890,51 @@ bool SincDownloadCrashDump(Sinc *sc, bool *newDump, uint8_t **dumpData, size_t *
         return false;
 
     return true;
+}
+
+
+/*
+ * NAME:        SincSynchronizeLog
+ * ACTION:      Get all the log entries since the specified log sequence number. 0 for all.
+ * PARAMETERS:  Sinc *sc            - the connection to use.
+ *              uint64_t sequenceNo - the log sequence number to start from. 0 for all log entries.
+ *              SiToro__Sinc__SynchronizeLogResponse **resp - where to put the response received.
+ *                  This message should be freed with si_toro__sinc__synchronize_log_response__free_unpacked(resp, NULL) after use.
+ * RETURNS:     true on success, false otherwise. On failure use SincCurrentErrorCode() and
+ *                  SincCurrentErrorMessage() to get the error status.
+ */
+
+bool SincSynchronizeLog(Sinc *sc, uint64_t sequenceNo, SiToro__Sinc__SynchronizeLogResponse **resp)
+{
+    // Send the request.
+    if (!SincRequestSynchronizeLog(sc, sequenceNo))
+        return false;
+
+    // Wait for the response.
+    if (!SincReadSynchronizeLogResponse(sc, sc->timeout, resp))
+        return false;
+
+    // Handle errors and clean up.
+    return SincInterpretSuccess(sc, (*resp)->success);
+}
+
+
+/*
+ * NAME:        SincSetTime
+ * ACTION:      Set the time on the device's real time clock. This is useful
+ *              to get logs with correct timestamps.
+ * PARAMETERS:  Sinc *sc            - the connection to use.
+ *              struct timeval *tv  - the time to set. Includes seconds and milliseconds.
+ * RETURNS:     true on success, false otherwise. On failure use SincCurrentErrorCode() and
+ *                  SincCurrentErrorMessage() to get the error status.
+ */
+
+bool SincSetTime(Sinc *sc, struct timeval *tv)
+{
+    // Send the request.
+    if (!SincRequestSetTime(sc, tv))
+        return false;
+
+    // Get the response.
+    return SincCheckSuccess(sc);
 }

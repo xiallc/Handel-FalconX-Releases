@@ -54,6 +54,8 @@
 
 #include "md_threads.h"
 
+#pragma clang diagnostic ignored "-Wthread-safety-analysis"
+
 XIA_SHARED int handel_md_thread_create(handel_md_Thread* thread)
 {
     int r = EBUSY;
@@ -329,35 +331,35 @@ XIA_SHARED int handel_md_event_wait(handel_md_Event* event,
         if (timeout != 0)
         {
             struct timespec t;
-            struct timeval tv;
-            gettimeofday(&tv, 0);
-            t.tv_sec = tv.tv_sec;
-            t.tv_nsec = tv.tv_usec * 1000L;
-            t.tv_sec += timeout / 1000;
-            timeout = (timeout % 1000) * 1000000;
-            if ((t.tv_nsec + timeout) >= 1000000000L)
-                t.tv_sec++;
-            t.tv_nsec = (t.tv_nsec + timeout) % 1000000000L;
-            for (;;)
+            r = clock_gettime(CLOCK_REALTIME, &t);
+            if (r == 0)
             {
-                int rr;
-                r = pthread_mutex_lock(&ei->mutex);
-                if (r)
-                    break;
-                if (!ei->set)
-                    r = pthread_cond_timedwait(&ei->cond, &ei->mutex, &t);
-                ei->set = false;
-                rr = pthread_mutex_unlock(&ei->mutex);
-                if (r != EAGAIN)
+                t.tv_sec += timeout / 1000;
+                timeout = (timeout % 1000) * 1000000;
+                if ((t.tv_nsec + timeout) >= 1000000000L)
+                    t.tv_sec++;
+                t.tv_nsec = (t.tv_nsec + timeout) % 1000000000L;
+                for (;;)
                 {
-                    if (r == 0)
+                    int rr;
+                    r = pthread_mutex_lock(&ei->mutex);
+                    if (r)
+                        break;
+                    if (!ei->set)
+                        r = pthread_cond_timedwait(&ei->cond, &ei->mutex, &t);
+                    ei->set = false;
+                    rr = pthread_mutex_unlock(&ei->mutex);
+                    if (r != EAGAIN)
+                    {
+                        if (r == 0)
+                            r = rr;
+                        break;
+                    }
+                    if (rr)
+                    {
                         r = rr;
-                    break;
-                }
-                if (rr)
-                {
-                    r = rr;
-                    break;
+                        break;
+                    }
                 }
             }
         }

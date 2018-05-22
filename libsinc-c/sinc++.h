@@ -42,6 +42,8 @@
 #include <vector>
 #include <cstdlib>
 #include <algorithm>
+#include <thread>
+#include <mutex>
 #include "sinc.h"
 #include "sinc_internal.h"
 
@@ -796,6 +798,9 @@ namespace SincProtocol
         // The C Sinc structure.
         ::Sinc sinc_;
 
+        // A mutex to prevent simultanously sending commands which would violate the protocol.
+        std::mutex commandMutex_;
+
     public:
         Sinc(std::string host, int port = SINC_PORT) :
             host_(host),
@@ -846,6 +851,19 @@ namespace SincProtocol
 
 
         //
+        // NAME:        getCommandMutex
+        // ACTION:      A mutex used when sending a command which requires a response.
+        //              Use a std::lock_guard to lock this mutex when using the requestXXX()
+        //              methods.
+        //
+
+        std::mutex &getCommandMutex()
+        {
+            return commandMutex_;
+        }
+
+
+        //
         // NAME:        connect
         // ACTION:      Connects a Sinc channel to a device on the given host and port.
         // RETURNS:     true on success, false otherwise. On failure use currentErrorCode() and
@@ -854,6 +872,7 @@ namespace SincProtocol
 
         bool connect()
         {
+            std::lock_guard<std::mutex> locker(commandMutex_);
             return SincConnect(&sinc_, host_.c_str(), port_);
         }
 
@@ -867,6 +886,7 @@ namespace SincProtocol
 
         bool disconnect()
         {
+            std::lock_guard<std::mutex> locker(commandMutex_);
             return SincDisconnect(&sinc_);
         }
 
@@ -880,6 +900,73 @@ namespace SincProtocol
 
         bool isConnected() { return SincIsConnected(&sinc_); }
 
+
+        //
+        // Commands which wait for a response. These can be used stand-alone.
+        //
+
+        bool doPing(int showOnConsole)                                { std::lock_guard<std::mutex> locker(commandMutex_); if (!requestPing(showOnConsole)) return false; return waitSuccess(); }
+        bool doGetParam(int channelId, const std::string &name, GetParamResponse &resp)  { std::lock_guard<std::mutex> locker(commandMutex_); if (!requestGetParam(channelId, name)) return false; return waitGetParamResponse(resp); }
+        bool doGetParams(std::vector<std::pair<int, std::string>> chanKeys, GetParamResponse &resp)  { std::lock_guard<std::mutex> locker(commandMutex_); if (!requestGetParams(chanKeys)) return false; return waitGetParamResponse(resp); }
+        bool doSetParam(int channelId, const KeyValue &param)         { std::lock_guard<std::mutex> locker(commandMutex_); if (!requestSetParam(channelId, param)) return false; return waitSuccess(); }
+        bool doSetParams(int channelId, const std::vector<KeyValue> &params) { std::lock_guard<std::mutex> locker(commandMutex_); if (!requestSetParams(channelId, params)) return false; return waitSuccess(); }
+        bool doCalibrate(int channelId)
+        {
+            std::lock_guard<std::mutex> locker(commandMutex_);
+            if (!requestStartCalibration(channelId))
+                return false;
+
+            if (!waitCalibrationComplete(channelId))
+                return false;
+
+            return true;
+        }
+
+        bool doStartCalibration(int channelId)                        { std::lock_guard<std::mutex> locker(commandMutex_); if (!requestStartCalibration(channelId)) return false; return waitSuccess(); }
+        bool doGetCalibration(int channelId, CalibrationInfo &calInfo) { std::lock_guard<std::mutex> locker(commandMutex_); if (!requestGetCalibration(channelId)) return false; return waitGetCalibrationResponse(calInfo); }
+        bool doSetCalibration(int channelId, const CalibrationInfo &calInfo) { std::lock_guard<std::mutex> locker(commandMutex_); if (!requestSetCalibration(channelId, calInfo)) return false; return waitSuccess(); }
+        bool doCalculateDcOffset(int channelId, int fromChannelId, double &offset) { std::lock_guard<std::mutex> locker(commandMutex_); if (!requestCalculateDcOffset(channelId)) return false; if (!waitSuccess()) return false; return waitCalculateDcOffsetResponse(fromChannelId, offset); }
+        bool doStartOscilloscope(int channelId)                       { std::lock_guard<std::mutex> locker(commandMutex_); if (!requestStartOscilloscope(channelId)) return false; return waitSuccess(); }
+        bool doStartHistogram(int channelId)                          { std::lock_guard<std::mutex> locker(commandMutex_); if (!requestStartHistogram(channelId)) return false; return waitSuccess(); }
+        bool doClearHistogramData(int channelId)                      { std::lock_guard<std::mutex> locker(commandMutex_); if (!requestClearHistogramData(channelId)) return false; return waitSuccess(); }
+        bool doStartListMode(int channelId)                           { std::lock_guard<std::mutex> locker(commandMutex_); if (!requestStartListMode(channelId)) return false; return waitSuccess(); }
+        bool doStop(int channelId, bool skip = false)                 { std::lock_guard<std::mutex> locker(commandMutex_); if (!requestStop(channelId, skip)) return false; return waitSuccess(); }
+        bool doListParamDetails(int channelId, ParamDetails &details) { std::lock_guard<std::mutex> locker(commandMutex_); if (!requestListParamDetails(channelId)) return false; return waitListParamDetailsResponse(details); }
+        bool doRestart()                                              { std::lock_guard<std::mutex> locker(commandMutex_); if (!requestRestart()) return false; return waitSuccess(); }
+        bool doResetSpatialSystem()                                   { std::lock_guard<std::mutex> locker(commandMutex_); if (!requestResetSpatialSystem()) return false; return waitSuccess(); }
+        bool doSoftwareUpdate(const std::string &appImage, const std::string &appChecksum, const std::string &fpgaImage, const std::string &fpgaChecksum, bool autoRestart) { std::lock_guard<std::mutex> locker(commandMutex_); if (!requestSoftwareUpdate(appImage, appChecksum, fpgaImage, fpgaChecksum, autoRestart)) return false; return waitSuccess(); }
+        bool doSaveConfiguration()                                    { std::lock_guard<std::mutex> locker(commandMutex_); if (!requestSaveConfiguration()) return false; return waitSuccess(); }
+        bool doDeleteSavedConfiguration()                             { std::lock_guard<std::mutex> locker(commandMutex_); if (!requestDeleteSavedConfiguration()) return false; return waitSuccess(); }
+        bool doMonitorChannels(const std::vector<int> &channels)      { std::lock_guard<std::mutex> locker(commandMutex_); if (!requestMonitorChannels(channels)) return false; return waitSuccess(); }
+        bool doProbeDatagram()                                        { std::lock_guard<std::mutex> locker(commandMutex_); if (!requestProbeDatagram()) return false; return waitSuccess(); }
+        bool doInitDatagramComms()                                    { std::lock_guard<std::mutex> locker(commandMutex_); if (!SincInitDatagramComms(&sinc_)) return false; return waitSuccess(); }
+        bool doDownloadCrashDump(DownloadCrashDump &resp)             { std::lock_guard<std::mutex> locker(commandMutex_); if (!requestDownloadCrashDump()) return false; return waitDownloadCrashDumpResponse(resp); }
+
+
+        //
+        // NAME:        getErrorCode / getReadErrorCode / getWriteErrorCode
+        // ACTION:      Get the most recent error code. getErrorCode() gets the most
+        //              recent error code. getReadErrorCode() gets the most recent read error.
+        //              getWriteErrorCode() gets the most recent write error.
+        // PARAMETERS:  Sinc *sc - the sinc connection.
+        //
+
+        ErrorCode getErrorCode() const        { return sinc_.err->code; }
+        ErrorCode getReadErrorCode() const    { return sinc_.readErr.code; }
+        ErrorCode getWriteErrorCode() const   { return sinc_.writeErr.code; }
+
+
+        //
+        // NAME:        getErrorMessage / getReadErrorMessage / getWriteErrorMessage
+        // ACTION:      Get the most recent error message in alphanumeric form. getErrorMessage()
+        //              gets the most recent error code. getReadErrorMessage() gets the most recent read error.
+        //              getWriteErrorMessage() gets the most recent write error.
+        // PARAMETERS:  Sinc *sc - the sinc connection.
+        //
+
+        std::string getErrorMessage() const        { return sinc_.err->msg; }
+        std::string getReadErrorMessage() const    { return sinc_.readErr.msg; }
+        std::string getWriteErrorMessage() const   { return sinc_.writeErr.msg; }
 
 
         //
@@ -929,6 +1016,15 @@ namespace SincProtocol
 
         //
         // Command "send request" functions which can be used stand-alone.
+        // After calling these you must get the appropriate response using
+        // waitXXX() or the protocol will be violated. Use doXXX() instead
+        // if unsure.
+        //
+        // Before calling any of these you must call getCommandMutex()
+        // and lock the mutex until after the response has been received
+        // so multiple threads don't attempt to access the protocol at
+        // the same time, which will cause a protocol violation and
+        // likely loss of happiness.
         //
 
         bool requestPing(int showOnConsole)                           { Buffer buf; buf.encodePing(showOnConsole); return send(buf); }
@@ -960,47 +1056,6 @@ namespace SincProtocol
         bool requestMonitorChannels(const std::vector<int> &channels) { Buffer buf; buf.encodeMonitorChannels(channels); return send(buf); }
         bool requestProbeDatagram()                                   { Buffer buf; buf.encodeProbeDatagram(); return send(buf); }
         bool requestDownloadCrashDump()                               { Buffer buf; buf.encodeDownloadCrashDump(); return send(buf); }
-
-
-        //
-        // Commands which wait for a response. These can be used stand-alone.
-        //
-
-        bool doPing(int showOnConsole)                                { if (!requestPing(showOnConsole)) return false; return waitSuccess(); }
-        bool doGetParam(int channelId, const std::string &name, GetParamResponse &resp)  { if (!requestGetParam(channelId, name)) return false; return waitGetParamResponse(resp); }
-        bool doGetParams(std::vector<std::pair<int, std::string>> chanKeys, GetParamResponse &resp)  { if (!requestGetParams(chanKeys)) return false; return waitGetParamResponse(resp); }
-        bool doSetParam(int channelId, const KeyValue &param)         { if (!requestSetParam(channelId, param)) return false; return waitSuccess(); }
-        bool doSetParams(int channelId, const std::vector<KeyValue> &params) { if (!requestSetParams(channelId, params)) return false; return waitSuccess(); }
-        bool doCalibrate(int channelId)
-        {
-            if (!requestStartCalibration(channelId))
-                return false;
-
-            if (!waitCalibrationComplete(channelId))
-                return false;
-
-            return true;
-        }
-
-        bool doStartCalibration(int channelId)                        { if (!requestStartCalibration(channelId)) return false; return waitSuccess(); }
-        bool doGetCalibration(int channelId, CalibrationInfo &calInfo) { if (!requestGetCalibration(channelId)) return false; return waitGetCalibrationResponse(calInfo); }
-        bool doSetCalibration(int channelId, const CalibrationInfo &calInfo) { if (!requestSetCalibration(channelId, calInfo)) return false; return waitSuccess(); }
-        bool doCalculateDcOffset(int channelId, int fromChannelId, double &offset) { if (!requestCalculateDcOffset(channelId)) return false; if (!waitSuccess()) return false; return waitCalculateDcOffsetResponse(fromChannelId, offset); }
-        bool doStartOscilloscope(int channelId)                       { if (!requestStartOscilloscope(channelId)) return false; return waitSuccess(); }
-        bool doStartHistogram(int channelId)                          { if (!requestStartHistogram(channelId)) return false; return waitSuccess(); }
-        bool doClearHistogramData(int channelId)                      { if (!requestClearHistogramData(channelId)) return false; return waitSuccess(); }
-        bool doStartListMode(int channelId)                           { if (!requestStartListMode(channelId)) return false; return waitSuccess(); }
-        bool doStop(int channelId, bool skip = false)                 { if (!requestStop(channelId, skip)) return false; return waitSuccess(); }
-        bool doListParamDetails(int channelId, ParamDetails &details) { if (!requestListParamDetails(channelId)) return false; return waitListParamDetailsResponse(details); }
-        bool doRestart()                                              { if (!requestRestart()) return false; return waitSuccess(); }
-        bool doResetSpatialSystem()                                   { if (!requestResetSpatialSystem()) return false; return waitSuccess(); }
-        bool doSoftwareUpdate(const std::string &appImage, const std::string &appChecksum, const std::string &fpgaImage, const std::string &fpgaChecksum, bool autoRestart) { if (!requestSoftwareUpdate(appImage, appChecksum, fpgaImage, fpgaChecksum, autoRestart)) return false; return waitSuccess(); }
-        bool doSaveConfiguration()                                    { if (!requestSaveConfiguration()) return false; return waitSuccess(); }
-        bool doDeleteSavedConfiguration()                             { if (!requestDeleteSavedConfiguration()) return false; return waitSuccess(); }
-        bool doMonitorChannels(const std::vector<int> &channels)      { if (!requestMonitorChannels(channels)) return false; return waitSuccess(); }
-        bool doProbeDatagram()                                        { if (!requestProbeDatagram()) return false; return waitSuccess(); }
-        bool doInitDatagramComms()                                    { if (!SincInitDatagramComms(&sinc_)) return false; return waitSuccess(); }
-        bool doDownloadCrashDump(DownloadCrashDump &resp)             { if (!requestDownloadCrashDump()) return false; return waitDownloadCrashDumpResponse(resp); }
 
 
         //
@@ -1175,31 +1230,6 @@ namespace SincProtocol
             return true;
         }
 
-
-        //
-        // NAME:        getErrorCode / getReadErrorCode / getWriteErrorCode
-        // ACTION:      Get the most recent error code. getErrorCode() gets the most
-        //              recent error code. getReadErrorCode() gets the most recent read error.
-        //              getWriteErrorCode() gets the most recent write error.
-        // PARAMETERS:  Sinc *sc - the sinc connection.
-        //
-
-        ErrorCode getErrorCode() const        { return sinc_.err->code; }
-        ErrorCode getReadErrorCode() const    { return sinc_.readErr.code; }
-        ErrorCode getWriteErrorCode() const   { return sinc_.writeErr.code; }
-
-
-        //
-        // NAME:        getErrorMessage / getReadErrorMessage / getWriteErrorMessage
-        // ACTION:      Get the most recent error message in alphanumeric form. getErrorMessage()
-        //              gets the most recent error code. getReadErrorMessage() gets the most recent read error.
-        //              getWriteErrorMessage() gets the most recent write error.
-        // PARAMETERS:  Sinc *sc - the sinc connection.
-        //
-
-        std::string getErrorMessage() const        { return sinc_.err->msg; }
-        std::string getReadErrorMessage() const    { return sinc_.readErr.msg; }
-        std::string getWriteErrorMessage() const   { return sinc_.writeErr.msg; }
     };
 }
 

@@ -1,11 +1,10 @@
+#ifndef _WIN32
 #include <string.h>
 #include <stdlib.h>
-#include <unistd.h>
 #include <stdio.h>
 #include <sys/types.h>
-#ifndef _WIN32
+#include <unistd.h>
 #include <sys/socket.h>
-#endif
 #include <netinet/in.h>
 #include <sys/select.h>
 #include <sys/time.h>
@@ -460,3 +459,5 @@ const char *DiscoverStrError(Discover *d)
 {
     return d->errStr;
 }
+
+#endif

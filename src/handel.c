@@ -34,6 +34,10 @@
  * SUCH DAMAGE.
  */
 
+/* Include the VLD header for memory debugging options */
+#ifdef __VLD_MEM_DBG__
+#include <vld.h>
+#endif
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -207,6 +211,11 @@ HANDEL_EXPORT int HANDEL_API xiaInitHandel(void)
 
     xiaLog(XIA_LOG_INFO, "xiaInitHandel", "Successfully initialized Handel %s", version);
 
+#ifdef __VLD_MEM_DBG__
+    xiaLog(XIA_LOG_INFO, "xiaInitHandel", "This version of Handel was built with VLD memory leak debugging enabled.");
+#endif
+    
+    
     return status;
 }
 

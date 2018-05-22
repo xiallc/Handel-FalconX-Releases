@@ -11,6 +11,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <time.h>
 
 #include "sinc.h"
 #include "sinc_internal.h"
@@ -164,7 +165,7 @@ void SincEncodeSetParam(SincBuffer *buf, int channelId, SiToro__Sinc__KeyValue *
 
 
 /*
- * NAME:        SincEncodeSetParams
+ * NAME:        SincEncodeSetParamsInternal
  * ACTION:      Requests setting named parameters on the device but doesn't wait for a response.
  *              Encode only version.
  * PARAMETERS:  SincBuffer *buf          - where to put the encoded packet.
@@ -177,7 +178,7 @@ void SincEncodeSetParam(SincBuffer *buf, int channelId, SiToro__Sinc__KeyValue *
  *              int numParams            - the number of parameters to set.
  */
 
-bool SincEncodeSetParams(SincBuffer *buf, int channelId, SiToro__Sinc__KeyValue *params, int numParams)
+static bool SincEncodeSetParamsInternal(SincBuffer *buf, int channelId, SiToro__Sinc__KeyValue *params, int numParams, bool setAllParams, const char *fromFirmwareVersion)
 {
     // Create the packet.
     int i;
@@ -197,10 +198,13 @@ bool SincEncodeSetParams(SincBuffer *buf, int channelId, SiToro__Sinc__KeyValue 
     setParamMsg.params = paramBuf;
     setParamMsg.n_params = (size_t)numParams;
 
-
     setParamMsg.has_channelid = true;
     setParamMsg.channelid = channelId;
 
+    setParamMsg.has_settingallparams = setAllParams;
+    setParamMsg.settingallparams = setAllParams;
+
+    setParamMsg.fromfirmwareversion = (char *)fromFirmwareVersion;
 
     // Encode it.
     uint8_t headerBuf[SINC_HEADER_LENGTH];
@@ -214,6 +218,62 @@ bool SincEncodeSetParams(SincBuffer *buf, int channelId, SiToro__Sinc__KeyValue 
     free(paramBuf);
 
     return true;
+}
+
+
+/*
+ * NAME:        SincEncodeSetParams
+ * ACTION:      Requests setting named parameters on the device but doesn't wait for a response.
+ *              Encode only version.
+ * PARAMETERS:  SincBuffer *buf          - where to put the encoded packet.
+ *              int channelId            - which channel to use.
+ *              SiToro__Sinc__KeyValue *param       - the key and value to set.
+ *                  Use si_toro__sinc__key_value__init() to initialise the struct.
+ *                  Set the key in param->key.
+ *                  Set the value type in param->valueCase and the value in one of intval,
+ *                  floatval, boolval, strval or optionval.
+ *              int numParams            - the number of parameters to set.
+ */
+
+bool SincEncodeSetParams(SincBuffer *buf, int channelId, SiToro__Sinc__KeyValue *params, int numParams)
+{
+    return SincEncodeSetParamsInternal(buf, channelId, params, numParams, false, NULL);
+}
+
+
+/*
+ * NAME:        SincEncodeSetAllParams
+ * ACTION:      Encodes setting all of the parameters on the device. If any parameters on the
+ *              device aren't set by this command they'll automatically be set to
+ *              sensible defaults. This is useful when loading a project file which
+ *              is intended to set all the values in a single lot. It ensures that
+ *              the device's parameters are upgraded automatically along with any
+ *              firmware upgrades.
+ *
+ *              If a set of saved device parameters are loaded after a firmware
+ *              update using SincSetParams() there may be faulty behavior. This
+ *              Is due to new parameters not being set as they're not defined in
+ *              the set of saved parameters. Using this call instead of
+ *              SincSetParams() when loading a complete device state ensures that
+ *              the device's parameters are upgraded automatically along with any
+ *              firmware upgrades.
+ * PARAMETERS:  SincBuffer *buf                     - where to put the encoded packet.
+ *              int channelId                       - which channel to use.
+ *              SiToro__Sinc__KeyValue *param       - the key and value to set.
+ *                  Set the key in param->key.
+ *                  Set the value type in param->valueCase and the value in one of intval,
+ *                  floatval, boolval, strval or optionval.
+ *              const char *fromFirmwareVersion     - the instrument.firmwareVersion
+ *                                                    of the saved parameters being
+ *                                                    restored.
+ *
+ * RETURNS:     true on success, false otherwise. On failure use SincCurrentErrorCode() and
+ *                  SincCurrentErrorMessage() to get the error status.
+ */
+
+bool SincEncodeSetAllParams(SincBuffer *buf, int channelId, SiToro__Sinc__KeyValue *params, int numParams, const char *fromFirmwareVersion)
+{
+    return SincEncodeSetParamsInternal(buf, channelId, params, numParams, true, fromFirmwareVersion);
 }
 
 
@@ -932,4 +992,71 @@ void SincEncodeDownloadCrashDump(SincBuffer *buf)
     ProtobufCBuffer *cBuf = &buf->cbuf.base;
     cBuf->append(cBuf, SINC_HEADER_LENGTH, headerBuf);
     si_toro__sinc__download_crash_dump_command__pack_to_buffer(&dlcdCmd, cBuf);
+}
+
+
+/*
+ * NAME:        SincEncodeSynchronizeLog
+ * ACTION:      Encodes a message to get all the log entries since the specified log sequence number. 0 for all.
+ * PARAMETERS:  SincBuffer *buf     - where to put the encoded packet.
+ *              uint64_t sequenceNo - the log sequence number to start from. 0 for all log entries.
+ * RETURNS:     true on success, false otherwise. On failure use SincCurrentErrorCode() and
+ *                  SincCurrentErrorMessage() to get the error status.
+ */
+
+void SincEncodeSynchronizeLog(SincBuffer *buf, uint64_t sequenceNo)
+{
+    // Create the packet.
+    SiToro__Sinc__SynchronizeLogCommand slCmd;
+    si_toro__sinc__synchronize_log_command__init(&slCmd);
+    if (sequenceNo > 0)
+    {
+        slCmd.has_lastsequenceno = true;
+        slCmd.lastsequenceno = sequenceNo;
+    }
+
+    // Encode it.
+    uint8_t headerBuf[SINC_HEADER_LENGTH];
+    size_t payloadLen = si_toro__sinc__synchronize_log_command__get_packed_size(&slCmd);
+    SincProtocolEncodeHeader(headerBuf, (int)payloadLen, SI_TORO__SINC__MESSAGE_TYPE__SYNCHRONIZE_LOG_COMMAND);
+
+    ProtobufCBuffer *cBuf = &buf->cbuf.base;
+    cBuf->append(cBuf, SINC_HEADER_LENGTH, headerBuf);
+    si_toro__sinc__synchronize_log_command__pack_to_buffer(&slCmd, cBuf);
+}
+
+
+/*
+ * NAME:        SincEncodeSetTime
+ * ACTION:      Encodes a message to send a request to set the time on the device's real time
+ *              clock. This is useful to get logs with correct timestamps.
+ * PARAMETERS:  SincBuffer *buf     - where to put the encoded packet.
+ *              struct timeval *tv  - the time to set. Includes seconds and milliseconds.
+ * RETURNS:     true on success, false otherwise. On failure use SincCurrentErrorCode() and
+ *                  SincCurrentErrorMessage() to get the error status.
+ */
+
+void SincEncodeSetTime(SincBuffer *buf, struct timeval *tv)
+{
+    // Create the packet.
+    SiToro__Sinc__SetTimeCommand stCmd;
+    si_toro__sinc__set_time_command__init(&stCmd);
+
+    SiToro__Sinc__Timestamp timestamp;
+    si_toro__sinc__timestamp__init(&timestamp);
+
+    timestamp.has_seconds = true;
+    timestamp.has_microseconds = true;
+    timestamp.seconds = tv->tv_sec;
+    timestamp.microseconds = tv->tv_usec;
+    stCmd.hosttime = &timestamp;
+
+    // Encode it.
+    uint8_t headerBuf[SINC_HEADER_LENGTH];
+    size_t payloadLen = si_toro__sinc__set_time_command__get_packed_size(&stCmd);
+    SincProtocolEncodeHeader(headerBuf, (int)payloadLen, SI_TORO__SINC__MESSAGE_TYPE__SET_TIME_COMMAND);
+
+    ProtobufCBuffer *cBuf = &buf->cbuf.base;
+    cBuf->append(cBuf, SINC_HEADER_LENGTH, headerBuf);
+    si_toro__sinc__set_time_command__pack_to_buffer(&stCmd, cBuf);
 }

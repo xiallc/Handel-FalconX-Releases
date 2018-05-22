@@ -18,7 +18,16 @@ extern "C"
 #endif
 
 #include <stdbool.h>
+#include <time.h>
 #include "sinc.pb-c.h"
+
+#ifndef _WIN32
+#include <sys/time.h>
+#else
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#endif
+
 
 // Connection defaults.
 #define SINC_PORT 8756
@@ -266,6 +275,7 @@ bool SincReadCheckParamConsistencyResponse(Sinc *sc, int timeout, SiToro__Sinc__
 bool SincReadDownloadCrashDumpResponse(Sinc *sc, int timeout, bool *newDump, uint8_t **dumpData, size_t *dumpSize);
 bool SincReadAsynchronousErrorResponse(Sinc *sc, int timeout, SiToro__Sinc__AsynchronousErrorResponse **resp, int *fromChannelId);
 bool SincReadAndDiscardPacket(Sinc *sc, int timeout);
+bool SincReadSynchronizeLogResponse(Sinc *sc, int timeout, SiToro__Sinc__SynchronizeLogResponse **resp);
 
 
 /*
@@ -321,6 +331,39 @@ bool SincGetParams(Sinc *sc, int *channelIds, const char **names, int numNames, 
 
 bool SincSetParam(Sinc *sc, int channelId, SiToro__Sinc__KeyValue *param);
 bool SincSetParams(Sinc *sc, int channelId, SiToro__Sinc__KeyValue *params, int numParams);
+
+
+/*
+ * NAME:        SincSetAllParams
+ * ACTION:      Sets all of the parameters on the device. If any parameters on the
+ *              device aren't set by this command they'll automatically be set to
+ *              sensible defaults. This is useful when loading a project file which
+ *              is intended to set all the values in a single lot. It ensures that
+ *              the device's parameters are upgraded automatically along with any
+ *              firmware upgrades.
+ *
+ *              If a set of saved device parameters are loaded after a firmware
+ *              update using SincSetParams() there may be faulty behavior. This
+ *              Is due to new parameters not being set as they're not defined in
+ *              the set of saved parameters. Using this call instead of
+ *              SincSetParams() when loading a complete device state ensures that
+ *              the device's parameters are upgraded automatically along with any
+ *              firmware upgrades.
+ * PARAMETERS:  Sinc *sc                            - the channel to request from.
+ *              int channelId                       - which channel to use.
+ *              SiToro__Sinc__KeyValue *param       - the key and value to set.
+ *                  Set the key in param->key.
+ *                  Set the value type in param->valueCase and the value in one of intval,
+ *                  floatval, boolval, strval or optionval.
+ *              const char *fromFirmwareVersion     - the instrument.firmwareVersion
+ *                                                    of the saved parameters being
+ *                                                    restored.
+ *
+ * RETURNS:     true on success, false otherwise. On failure use SincCurrentErrorCode() and
+ *                  SincCurrentErrorMessage() to get the error status.
+ */
+
+bool SincSetAllParams(Sinc *sc, int channelId, SiToro__Sinc__KeyValue *params, int numParams, const char *fromFirmwareVersion);
 
 
 /*
@@ -583,7 +626,7 @@ bool SincStop(Sinc *sc, int channelId, int timeout, bool skip);
 /*
  * NAME:        SincListParamDetails
  * ACTION:      Returns a list of matching device parameters and their details.
- * PARAMETERS:  Sinc *sc                  - the channel.
+ * PARAMETERS:  Sinc *sc                  - the connection to use.
  *              int channelId             - which channel to use.
  *              char *matchPrefix         - a key prefix to match. Only matching keys are returned. Empty string for all keys.
  *              SiToro__Sinc__ListParamDetailsResponse **resp - where to put the response received.
@@ -749,6 +792,33 @@ bool SincDownloadCrashDump(Sinc *sc, bool *newDump, uint8_t **dumpData, size_t *
 
 
 /*
+ * NAME:        SincSynchronizeLog
+ * ACTION:      Get all the log entries since the specified log sequence number. 0 for all.
+ * PARAMETERS:  Sinc *sc            - the connection to use.
+ *              uint64_t sequenceNo - the log sequence number to start from. 0 for all log entries.
+ *              SiToro__Sinc__SynchronizeLogResponse **resp - where to put the response received.
+ *                  This message should be freed with si_toro__sinc__synchronize_log_response__free_unpacked(resp, NULL) after use.
+ * RETURNS:     true on success, false otherwise. On failure use SincCurrentErrorCode() and
+ *                  SincCurrentErrorMessage() to get the error status.
+ */
+
+bool SincSynchronizeLog(Sinc *sc, uint64_t sequenceNo, SiToro__Sinc__SynchronizeLogResponse **resp);
+
+
+/*
+ * NAME:        SincSetTime
+ * ACTION:      Set the time on the device's real time clock. This is useful
+ *              to get logs with correct timestamps.
+ * PARAMETERS:  Sinc *sc            - the connection to use.
+ *              struct timeval *tv  - the time to set. Includes seconds and milliseconds.
+ * RETURNS:     true on success, false otherwise. On failure use SincCurrentErrorCode() and
+ *                  SincCurrentErrorMessage() to get the error status.
+ */
+
+bool SincSetTime(Sinc *sc, struct timeval *tv);
+
+
+/*
  * NAME:        SincSend
  * ACTION:      Send a send buffer. Automatically clears the buffer afterwards.
  * PARAMETERS:  Sinc *sc            - the sinc connection.
@@ -795,6 +865,7 @@ bool SincRequestGetParam(Sinc *sc, int channelId, char *name);
 bool SincRequestGetParams(Sinc *sc, int *channelIds, const char **names, int numNames);
 bool SincRequestSetParam(Sinc *sc, int channelId, SiToro__Sinc__KeyValue *param);
 bool SincRequestSetParams(Sinc *sc, int channelId, SiToro__Sinc__KeyValue *param, int numParams);
+bool SincRequestSetAllParams(Sinc *sc, int channelId, SiToro__Sinc__KeyValue *param, int numParams, const char *fromFirmwareVersion);
 bool SincRequestStartCalibration(Sinc *sc, int channelId);
 bool SincRequestGetCalibration(Sinc *sc, int channelId);
 bool SincRequestSetCalibration(Sinc *sc, int channelId, SincCalibrationData *calibData, SincCalibrationPlot *example, SincCalibrationPlot *model, SincCalibrationPlot *final);
@@ -817,6 +888,8 @@ bool SincRequestMonitorChannels(Sinc *sc, int *channelSet, int numChannels);
 bool SincRequestProbeDatagram(Sinc *sc);
 bool SincRequestCheckParamConsistency(Sinc *sc, int channelId);
 bool SincRequestDownloadCrashDump(Sinc *sc);
+bool SincRequestSynchronizeLog(Sinc *sc, uint64_t sequenceNo);
+bool SincRequestSetTime(Sinc *sc, struct timeval *tv);
 
 
 /*
@@ -838,6 +911,7 @@ void SincEncodeGetParam(SincBuffer *buf, int channelId, const char *name);
 bool SincEncodeGetParams(SincBuffer *buf, int *channelIds, const char **names, int numNames);
 void SincEncodeSetParam(SincBuffer *buf, int channelId, SiToro__Sinc__KeyValue *param);
 bool SincEncodeSetParams(SincBuffer *buf, int channelId, SiToro__Sinc__KeyValue *params, int numParams);
+bool SincEncodeSetAllParams(SincBuffer *buf, int channelId, SiToro__Sinc__KeyValue *params, int numParams, const char *fromFirmwareVersion);
 void SincEncodeStartCalibration(SincBuffer *buf, int channelId);
 void SincEncodeGetCalibration(SincBuffer *buf, int channelId);
 void SincEncodeSetCalibration(SincBuffer *buf, int channelId, SincCalibrationData *calibData, SincCalibrationPlot *example, SincCalibrationPlot *model, SincCalibrationPlot *final);
@@ -861,6 +935,8 @@ void SincEncodeSuccessResponse(SincBuffer *buf, SiToro__Sinc__ErrorCode errorCod
 void SincEncodeProbeDatagram(SincBuffer *buf);
 void SincEncodeCheckParamConsistency(SincBuffer *buf, int channelId);
 void SincEncodeDownloadCrashDump(SincBuffer *buf);
+void SincEncodeSynchronizeLog(SincBuffer *buf, uint64_t sequenceNo);
+void SincEncodeSetTime(SincBuffer *buf, struct timeval *tv);
 
 
 /*
@@ -923,6 +999,7 @@ bool SincDecodeGetCalibrationResponse(SincError *err, SincBuffer *packet, SiToro
 bool SincDecodeCalculateDCOffsetResponse(SincError *err, SincBuffer *packet, SiToro__Sinc__CalculateDcOffsetResponse **resp, double *dcOffset, int *fromChannelId);
 bool SincDecodeListParamDetailsResponse(SincError *err, SincBuffer *packet, SiToro__Sinc__ListParamDetailsResponse **resp, int *fromChannelId);
 bool SincDecodeOscilloscopeDataResponse(SincError *err, SincBuffer *packet, int *fromChannelId, uint64_t *dataSetId, SincOscPlot *resetBlanked, SincOscPlot *rawCurve);
+bool SincDecodeOscilloscopeDataResponseAsPlotArray(SincError *err, SincBuffer *packet, int *fromChannelId, uint64_t *dataSetId, SincOscPlot *plotArray, int maxPlotArray, int *plotArraySize);
 bool SincDecodeHistogramDataResponse(SincError *err, SincBuffer *packet, int *fromChannelId, SincHistogram *accepted, SincHistogram *rejected, SincHistogramCountStats *stats);
 bool SincDecodeHistogramDatagramResponse(SincError *err, SincBuffer *packet, int *fromChannelId, SincHistogram *accepted, SincHistogram *rejected, SincHistogramCountStats *stats);
 bool SincDecodeListModeDataResponse(SincError *err, SincBuffer *packet, int *fromChannelId, uint8_t **data, int *dataLen, uint64_t *dataSetId);
@@ -931,6 +1008,7 @@ bool SincDecodeCheckParamConsistencyResponse(SincError *err, SincBuffer *packet,
 bool SincDecodeAsynchronousErrorResponse(SincError *err, SincBuffer *packet, SiToro__Sinc__AsynchronousErrorResponse **resp, int *fromChannelId);
 bool SincDecodeSoftwareUpdateCompleteResponse(SincError *err, SincBuffer *packet);
 bool SincDecodeDownloadCrashDumpResponse(SincError *err, SincBuffer *packet, bool *newDump, uint8_t **dumpData, size_t *dumpSize);
+bool SincDecodeSynchronizeLogResponse(SincError *err, SincBuffer *packet, SiToro__Sinc__SynchronizeLogResponse **resp);
 
 
 /*

@@ -66,8 +66,7 @@ typedef struct _AddChanType {
 /** Interface Transports **/
 enum {
   NO_INTERFACE = 0,
-  INET,
-  SITORO,
+  INET
 };
 
 /* Module-Name Tokens */

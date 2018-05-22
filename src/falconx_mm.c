@@ -60,11 +60,6 @@
 #include "falconx_mm.h"
 #include "falconxn_psl.h"
 
-#ifdef _MSC_VER
-#pragma warning(once: 4100) /* unreferenced formal parameter */
-#pragma warning(once: 4127) /* conditional expression is constant */
-#endif
-
 /*
  * Data Formatter Helpers
  */
@@ -161,7 +156,6 @@ void psl__MappingModeBuffers_Toggle(MM_Buffers* buffers)
     int buffer = psl__MappingModeBuffers_Next(buffers);
     psl__MappingModeBuffers_Active_Set(buffers, buffer);
     psl__MappingModeBuffers_Active_Reset(buffers);
-    psl__MappingModeBuffers_Next_Clear(buffers);
 }
 
 void psl__MappingModeBuffers_Overrun(MM_Buffers* buffers)

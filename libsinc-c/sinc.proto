@@ -75,7 +75,7 @@ enum MessageType {
     TRIGGER_HISTOGRAM_COMMAND = 43;
     SYNCHRONIZE_LOG_COMMAND = 44;
     SYNCHRONIZE_LOG_RESPONSE = 45;
-    SYNCHRONIZE_TIME_COMMAND = 46;
+    SET_TIME_COMMAND = 46;
 }
 
 
@@ -102,11 +102,11 @@ enum HistogramTrigger
 enum LogLevel
 {
     FATAL = 1;
-    ERROR = 2;
-    WARNING = 3;
-    INFO = 4;
+    ALARM = 2;
+    ERROR = 3;
+    WARNING = 4;
+    INFO = 5;
 }
-
 
 // All responses include this section which indicates success or failure.
 // errorCode and message are only set if the command failed.
@@ -216,13 +216,23 @@ message ParamUpdatedResponse {
 
 // SetParamCommand sets the value of a user parameter. It results in a SuccessResponse.
 //
-// param:  A single Key value for parameter to be set.
-// params: Multiple Key values to be set if multiple are needed.
+// param:               A single Key value for parameter to be set.
+// params:              Multiple Key values to be set if multiple are needed.
+// settingAllParams:    Use this if you're setting all the parameters in a single
+//                      command and want any unset parameters to return to defaults.
+//                      This is useful when loading a old project file to ensure that
+//                      all the newly added parameters are set to sensible values.
+// fromFirmwareVersion: When using settingAllParams you can include the firmware version
+//                      of the parameters being set. This version is obtained from
+//                      instrument.firmwareVersion. This will allow any parameter
+//                      upgrades to be applied automatically.
 
 message SetParamCommand {
     optional KeyValue        param = 1;      // deprecated.
     optional int32           channelId = 2;
     repeated KeyValue        params = 3;
+    optional bool            settingAllParams = 4;
+    optional string          fromFirmwareVersion = 5;
 }
 
 
@@ -750,7 +760,7 @@ message CheckParamConsistencyResponse {
 
 // TriggerHistogramCommand provides a means of software triggering
 // histogram data collection. When the histogram.mode parameter is
-// set to "gated" and gate.gate.statsCollectionMode is set to
+// set to "gated" and gate.statsCollectionMode is set to
 // "software" histograms will be triggered via this command.
 // This results in a SuccessResponse.
 
@@ -763,7 +773,7 @@ message TriggerHistogramCommand {
 
 message Timestamp {
     optional int64           seconds = 1;
-    optional int32           nanoseconds = 2;
+    optional int32           microseconds = 2;
 }
 
 
@@ -773,7 +783,7 @@ message Timestamp {
 // This results in a SynchronizeLogResponse.
 
 message SynchronizeLogCommand {
-    optional int32           lastSequenceNo = 1;
+    optional uint64          lastSequenceNo = 1;
 }
 
 
@@ -786,10 +796,10 @@ message SynchronizeLogCommand {
 // errorCode:      A numeric error code for machine readable errors.
 // message:        A descriptive error message.
 // channelId:      For errors which have an associated channel id.
-//                 Otherwise -1.
+// Timestamp:      When the log event occurred.
 
 message LogEntry {
-    optional int32           sequenceNo = 1;
+    optional uint64          sequenceNo = 1;
     optional LogLevel        level = 2;
     optional ErrorCode       errorCode = 3;
     optional string          message = 4;
@@ -807,12 +817,12 @@ message SynchronizeLogResponse {
 }
 
 
-// SynchronizeTimeCommand sets the system time on the device. It also
+// SetTimeCommand sets the system time on the device. It also
 // adjusts any log entries by the difference between the device time
 // and the host time. This should result in logs which are
 // approximately in sync with the host.
 // This results in a SuccessResponse.
 
-message SynchronizeTimeCommand {
+message SetTimeCommand {
     optional Timestamp       hostTime = 1;
 }

@@ -2205,6 +2205,8 @@ static void writeUint64(FILE *outFile, uint64_t v)
 
 bool SincArraySaveScan(SincArray *sa, const char *fileName, int durationMs, int histogramCount, bool appendMode)
 {
+    int i;
+
     // Open the file.
     FILE *outFile = fopen(fileName, appendMode ? "w+" : "w");
     if (outFile == NULL)
@@ -2219,7 +2221,7 @@ bool SincArraySaveScan(SincArray *sa, const char *fileName, int durationMs, int 
     uint64_t numChannels = sa->numDevices * sa->channelsPerDevice;
     writeUint64(outFile, numChannels);
     writeUint64(outFile, sa->numDevices);
-    for (int i = 0; i < sa->numDevices; i++)
+    for (i = 0; i < sa->numDevices; i++)
     {
         writeUint64(outFile, sa->channelsPerDevice);
     }
@@ -2357,9 +2359,11 @@ bool SincArraySaveScan(SincArray *sa, const char *fileName, int durationMs, int 
 
 bool SincArraySetMasterSynchronisation(SincArray *sa, int masterId, int clocksPerCount, int countsPerGate, bool useMasterClock)
 {
+    int i;
+
     // Set the clock parameters once per board.
     SiToro__Sinc__KeyValue kvs[4 * sa->numDevices];
-    for (int i = 0; i < sa->numDevices; i++)
+    for (i = 0; i < sa->numDevices; i++)
     {
         int instrumentChannelId = i * sa->channelsPerDevice;
 

@@ -351,7 +351,7 @@ def msvc_get_flags(ctx):
               'warnings' : { 'debug'  : pcw,
                              'release': pcw },
               'no-warnings' : { 'debug'  : pcnw,
-                                'release': pcw },
+                                'release': pcnw },
               'linkflags': { 'debug'  : plf,
                              'release': plf },
               'lib'      : { 'debug'  : plib,

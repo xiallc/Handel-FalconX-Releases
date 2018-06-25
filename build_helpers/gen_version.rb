@@ -1,3 +1,4 @@
+require 'date'
 require 'yaml'
 
 release = ARGV.delete '--release'

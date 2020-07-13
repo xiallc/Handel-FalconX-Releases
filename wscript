@@ -119,11 +119,13 @@ def build(bld):
         threads = [src + 'handel_md_threads_posix.c']
         sockets = []
 
-    defines = ['HANDEL_MAKE_DLL=1']
+    defines = []
     if windows:
-        defines += ['_CRT_SECURE_NO_WARNINGS',
+        defines += ['HANDEL_MAKE_DLL=1',
+                    '_CRT_SECURE_NO_WARNINGS',
                     'WIN32',
-                    'WIN32_LEAN_AND_MEAN'] # Avoid winsock2.h/windows.h order issues.
+                    'WIN32_LEAN_AND_MEAN', # Avoid winsock2.h/windows.h order issues.
+                    'MINIZ_STATIC_DEFINE'] # To build MINIZ static lib
 
     includes = ['.', 'inc', 'libsinc-c', 'miniz']
     use = ['sinc', 'miniz', 'xia_version.h']
@@ -132,16 +134,31 @@ def build(bld):
         use += ['VLD']
 
     bld.env.GVER_FLAGS = '--release' if bld.options.releasing else ''
-    bld(rule      = '${RUBY} ${GVER} ${GVER_FLAGS} ${SRC} ${TGT}',
-        target   = 'xia_version.h',
-        source   = 'tools/releaser/version.yml')
+    bld(rule   = '${RUBY} ${GVER} ${GVER_FLAGS} ${SRC} ${TGT}',
+        target = 'xia_version.h',
+        source = 'tools/releaser/version.yml')
+
+    if windows:
+        miniz_export = 'miniz/miniz_export_msvc.h'
+        shell_copy = 'copy'
+    else:
+        miniz_export = 'miniz/miniz_export_gcc.h'
+        shell_copy = 'cp'
+
+    bld(rule   = shell_copy + ' ${SRC} ${TGT}',
+        source = miniz_export,
+        target = 'miniz_export.h',
+        color  = 'BLUE')
 
     bld(features = 'c cstlib',
         target   = 'miniz',
-        source   = ['miniz/miniz.c'],
+        source   = ['miniz/miniz.c',
+                    'miniz/miniz_tdef.c',
+                    'miniz/miniz_tinfl.c'],
         defines  = defines,
         cflags   = bld.env['WARNINGS'] + bld.env['NO_WARNINGS'] ,
-        includes = includes)
+        includes = includes,
+        use      = 'miniz_export.h')
 
     bld(features = 'c cstlib',
         target   = 'sinc',
@@ -178,6 +195,7 @@ def build(bld):
                     src + 'handel_log.c',
                     src + 'handel_run_control.c',
                     src + 'handel_sort.c',
+                    src + 'handel_error.c',
                     src + 'xia_assert.c',
                     src + 'xia_file.c',
                     src + 'md_shim.c',
@@ -213,6 +231,8 @@ def build(bld):
              'hd-det-characterize',
              'hd-dc-pulses',
              'hd-adc-trace',
+             'hd-dc-offset',
+             'hd-error-code',
              'hd-mca',
              'hd-mca-preset',
              'hd-mm1',

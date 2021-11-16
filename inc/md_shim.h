@@ -51,6 +51,6 @@ XIA_SHARED void dxp_md_log(int level, const char *routine, const char *message,
                            int error, const char *file, int line);
 XIA_SHARED void dxp_md_output(const char *filename);
 
-XIA_SHARED struct timeval dxp_md_gettimeofday();
+XIA_SHARED struct timeval dxp_md_gettimeofday(void);
 
 #endif /* MD_SHIM_H */

@@ -288,7 +288,7 @@ int gettimeofday(struct timeval *tp, void *tzp)
 }
 #endif
 
-HANDEL_SHARED struct timeval dxp_md_gettimeofday()
+HANDEL_SHARED struct timeval dxp_md_gettimeofday(void)
 {
     struct timeval t;
     gettimeofday(&t, NULL);

@@ -212,7 +212,7 @@ def build(bld):
     if bld.options.memory_test:
         bld(features = 'cprogram c',
             target   = 'handel_memory_leak_test',
-            source   = 'tests/memory_leak_test/memory_leak_test.c',
+            source   = 'tests/c/hd-mm3.c',
             cflags   = bld.env['WARNINGS'],
             defines  = defines,
             includes = includes,
@@ -237,6 +237,7 @@ def build(bld):
              'hd-mca-preset',
              'hd-mm1',
              'hd-mm1-trace',
+             'hd-mm3',
              'hd-run-spec',
              'hd-get-acq',
              'hd-set-acq',
@@ -359,6 +360,8 @@ def msvc_get_flags(ctx):
         pcfr = ['/MD']
         pcw = ['/W4']
         pcnw = ['/wd4127', # C4127: conditional expression is constant
+                '/wd4204', # C4204: nonstandard extension used: non-constant aggregate
+                '/wd4221', # C4221: nonstandard extension used: ...: cannot be initialized using address of automatic variable
                 '/wd4244'] # C4244: 'function': conversion from ... to ... possible loss of data
         plf = ['/MANIFEST', '/nologo', '/DEBUG', '/INCREMENTAL:NO']
         plib = []

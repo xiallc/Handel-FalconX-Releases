@@ -58,6 +58,11 @@
 #define XMAP_MAX_PIXELS_PER_BUFFER 1024
 
 /*
+ * Default size of a listmode buffer.
+ */
+#define XMAP_LISTMODE_BUFFER ((1024UL * 1024UL) / sizeof(32))
+
+/*
  * XMAP mapping stats clock tick in seconds. It's effectively 16x the
  * XMAP clock. We reuse this unit because it's a fair balance of
  * precision and range for mapping pixel stats.
@@ -83,7 +88,7 @@ typedef enum {
     MAPPING_MODE_MCA = 0,
     MAPPING_MODE_MCA_FSM = 1,
     MAPPING_MODE_SCA = 2,
-    MAPPINGMODE_LIST = 3,
+    MAPPING_MODE_LIST = 3,
     MAPPING_MODE_COUNT,
     MAPPING_MODE_NIL,
 } MM_Mode;
@@ -179,7 +184,7 @@ typedef struct
 {
     uint16_t   numMCAChannels; /* 16 bits constrained by buffer format. */
     int        detChan;
-    boolean_t  listMode;
+    boolean_t  listMode;            /* use list mode for fast pulses */
     uint32_t   runNumber;
     uint32_t   pixelHeaderSize;
     uint32_t   bufferHeaderSize;
@@ -187,6 +192,15 @@ typedef struct
     MM_Buffers buffers;
     MM_Binner  bins;
 } MMC1_Data;
+
+typedef struct
+{
+    int        detChan;
+    uint32_t   runNumber;
+    size_t     data_setId;
+    size_t     buffer_size;
+    MM_Buffers buffers;
+} MMC3_Data;
 
 /* Mapping mode control. */
 typedef struct {
@@ -223,8 +237,10 @@ void      psl__MappingModeBuffers_Pixel_Inc(MM_Buffers* buffers);
 boolean_t psl__MappingModeBuffers_PixelsReceived(MM_Buffers* buffers);
 void      psl__MappingModeBuffers_Drop(MM_Buffers* buffers, uint32_t drops);
 
+size_t    psl__MappingModeBuffers_A_Level(MM_Buffers* buffers);
 boolean_t psl__MappingModeBuffers_A_Full(MM_Buffers* buffers);
 boolean_t psl__MappingModeBuffers_A_Active(MM_Buffers* buffers);
+size_t    psl__MappingModeBuffers_B_Level(MM_Buffers* buffers);
 boolean_t psl__MappingModeBuffers_B_Full(MM_Buffers* buffers);
 boolean_t psl__MappingModeBuffers_B_Active(MM_Buffers* buffers);
 
@@ -245,8 +261,7 @@ uint32_t  psl__MappingModeBuffers_Next_Drops(MM_Buffers* buffers);
 int       psl__MappingModeBuffers_Active(MM_Buffers* buffers);
 char      psl__MappingModeBuffers_Active_Label(MM_Buffers* buffers);
 uint32_t* psl__MappingModeBuffers_Active_Data(MM_Buffers* buffers);
-boolean_t psl__MappingModeBuffers_Active_Done(MM_Buffers* buffers);
-void      psl__MappingModeBuffers_Active_SetDone(MM_Buffers* buffers);
+boolean_t psl__MappingModeBuffers_Active_Full(MM_Buffers* buffers);
 int       psl__MappingModeBuffers_Active_Clear(MM_Buffers* buffers);
 int       psl__MappingModeBuffers_Active_Reset(MM_Buffers* buffers);
 size_t    psl__MappingModeBuffers_Active_Level(MM_Buffers* buffers);
@@ -255,9 +270,14 @@ void      psl__MappingModeBuffers_Active_MoveLevel(MM_Buffers* buffers, size_t l
 size_t    psl__MappingModeBuffers_Active_Remaining(MM_Buffers* buffers);
 uint32_t  psl__MappingModeBuffers_Active_Pixels(MM_Buffers* buffers);
 uint32_t  psl__MappingModeBuffers_Active_PixelTotal(MM_Buffers* buffers);
+boolean_t psl__MappingModeBuffers_Active_Done(MM_Buffers* buffers);
+void      psl__MappingModeBuffers_Active_SetDone(MM_Buffers* buffers);
 
+/*
+ * Copy in and out. The buffers used is fixed.
+ */
 int psl__MappingModeBuffers_CopyIn(MM_Buffers* buffers, void* value, size_t size);
-int psl__MappingModeBuffers_CopyOut(MM_Buffers* buffers, void* value, size_t* size);
+int psl__MappingModeBuffers_CopyOut(MM_Buffers* buffers,  void* value, size_t* size);
 
 /*
  * Mapping Mode Binner.
@@ -296,6 +316,14 @@ MMC1_Data* psl__MappingModeControl_MM1Data(MM_Control* control);
 size_t psl__MappingModeControl_MM1BufferSize(uint16_t number_mca_channels,
                                              int64_t num_pixels_per_buffer);
 
+int psl__MappingModeControl_OpenMM3(MM_Control* control,
+                                    int         detChan,
+                                    uint32_t    run_number,
+                                    size_t      buffer_size);
+int psl__MappingModeControl_CloseMM3(MM_Control* control);
+MMC3_Data* psl__MappingModeControl_MM3Data(MM_Control* control);
+size_t psl__MappingModeControl_MM3BufferSize(MM_Control* control);
+
 MM_Mode psl__MappingModeControl_Mode(MM_Control* control);
 
 /*
@@ -310,5 +338,8 @@ void psl__WriteDbl(uint16_t* buffer, double value);
 int psl__XMAP_WriteBufferHeader_MM1(MMC1_Data* mm1);
 int psl__XMAP_UpdateBufferHeader_MM1(MMC1_Data* mm1);
 int psl__XMAP_WritePixelHeader_MM1(MMC1_Data* mm1, MM_Pixel_Stats* stats);
+
+int psl__XMAP_WriteBufferHeader_MM3(MMC3_Data* mm3);
+int psl__XMAP_UpdateBufferHeader_MM3(MMC3_Data* mm3);
 
 #endif

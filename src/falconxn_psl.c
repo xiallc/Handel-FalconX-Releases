@@ -466,7 +466,7 @@ PSL_STATIC void falconXNSetSincKeyValue(SiToro__Sinc__KeyValue* kv, const char* 
         PRAGMA_IGNORE_CAST_QUALIFIER
         kv->optionval = (char*) value;
     PRAGMA_POP
-        }
+}
 
 PSL_STATIC void falconXNClearCalibrationData(SincCalibrationPlot* plot)
 {
@@ -538,20 +538,29 @@ PSL_STATIC void falconXNSetDetectorStats(double*                  detectorStats,
 /*
  * Handle the SINC API result.
  */
-PSL_STATIC int falconXNSincResultToHandel(int code, const char* msg)
+PSL_STATIC int falconXNSincResultToHandel(SiToro__Sinc__ErrorCode code, const char* msg)
 {
     int handelError = XIA_SUCCESS;
-    if (code != 0) {
-        handelError = XIA_FN_BASE_CODE + code;
+    if (code != SI_TORO__SINC__ERROR_CODE__NO_ERROR) {
+        handelError = XIA_FN_BASE_CODE + (int) code;
         pslLog(PSL_LOG_ERROR, handelError, "%s", msg);
     }
     return handelError;
 }
 
 /*
+ * Handle the SINC API result.
+ */
+PSL_STATIC int falconXNSincToHandelError(const Sinc* sinc)
+{
+    return falconXNSincResultToHandel(SincCurrentErrorCode((Sinc*) sinc),
+                                      SincCurrentErrorMessage((Sinc*) sinc));
+}
+
+/*
  * Handle the SINC Error result.
  */
-PSL_STATIC int falconXNSincErrorToHandel(SincError* se)
+PSL_STATIC int falconXNSincErrorToHandelError(SincError* se)
 {
     return falconXNSincResultToHandel(se->code, se->msg);
 }
@@ -590,10 +599,7 @@ PSL_STATIC acqValue psl__GetAcqValue(FalconXNDetector* fDetector,
     XiaDefaults *defaults = xiaGetDefaultFromDetChan(fDetector->detChan);
     ASSERT(defaults);
 
-    acqValue acqVal;
-
-    acqVal.type = acq->type;
-    acqVal.ref.i = -123245;
+    acqValue acqVal = {acq->type, {-12345}};
 
     if (PSL_ACQ_FLAG_SET(acq, PSL_ACQ_READ_ONLY)) {
         FAIL();
@@ -857,6 +863,26 @@ PSL_STATIC int psl__DetectorSignal(FalconXNDetector* fDetector)
     return status;
 }
 
+PSL_STATIC int psl__DetectorAsyncSignal(FalconXNDetector* fDetector)
+{
+    int status = XIA_SUCCESS;
+
+    if (fDetector->asyncReady) {
+        fDetector->asyncReady = FALSE_;
+        status = psl__DetectorSignal(fDetector);
+        if (status != XIA_SUCCESS) {
+            pslLog(PSL_LOG_ERROR, status, "Detector event signal error");
+        }
+    }
+
+    return status;
+}
+
+PSL_STATIC void psl__DetectorAsyncPrime(FalconXNDetector* fDetector)
+{
+    fDetector->asyncReady = TRUE_;
+}
+
 PSL_STATIC void psl__FlushResponse(Sinc_Response* resp)
 {
     resp->channel = -1;
@@ -939,7 +965,7 @@ PSL_STATIC int psl__CheckSuccessResponse(Module* module)
     resp = response.response;
 
     if (resp->has_errorcode) {
-        status = XIA_FN_BASE_CODE + resp->errorcode;
+        status = XIA_FN_BASE_CODE + (int) resp->errorcode;
         if (resp->message != NULL) {
             pslLog(PSL_LOG_ERROR, status,
                    "(%d) %s", resp->errorcode, resp->message);
@@ -1114,7 +1140,6 @@ PSL_STATIC int psl__LoadChannelFeatures(Module* module, int modChan)
     return XIA_SUCCESS;
 }
 
-
 /*
  * Sends a command to stop any form of data acquisition on the
  * channel. @a modChan is a module channel (SINC channel) or -1 for
@@ -1271,7 +1296,7 @@ PSL_STATIC int psl__GetParamValue(Module* module, int channel,
 
     kv = resp->results[0];
 
-    if (kv->has_paramtype && (kv->paramtype == paramType)) {
+    if (kv->has_paramtype && ((int) kv->paramtype == paramType)) {
         if (paramType == SI_TORO__SINC__KEY_VALUE__PARAM_TYPE__STRING_TYPE) {
             strncpy(val->str.str, kv->strval, val->str.len);
         } else if (paramType == SI_TORO__SINC__KEY_VALUE__PARAM_TYPE__INT_TYPE) {
@@ -1458,7 +1483,7 @@ PSL_STATIC int psl__GetADCTrace(Module* module, FalconXNDetector* fDetector, voi
     /*
      * Wait for the ready state.
      */
-    fDetector->asyncReady = TRUE_;
+    psl__DetectorAsyncPrime(fDetector);
 
     status = psl__DetectorUnlock(fDetector);
     if (status != XIA_SUCCESS)
@@ -1532,7 +1557,7 @@ PSL_STATIC int psl__UpdateCalibration(Module* module, FalconXNDetector* fDetecto
     if (kv->has_paramtype &&
         (kv->paramtype == SI_TORO__SINC__KEY_VALUE__PARAM_TYPE__BOOL_TYPE)) {
         fDetector->calibrationState = kv->boolval ? CalibrationReady :
-            CalibrationNone;
+                                        CalibrationNone;
     }
 
     si_toro__sinc__get_param_response__free_unpacked(resp, NULL);
@@ -2163,7 +2188,6 @@ ACQ_HANDLER_DECL(termination)
 
     return XIA_SUCCESS;
 }
-
 
 ACQ_HANDLER_DECL(attenuation)
 {
@@ -3827,6 +3851,61 @@ PSL_STATIC int psl__GainCalibrate(int detChan, Detector *det, int modChan,
     return status;
 }
 
+PSL_STATIC int psl__StopAcquisition(Module* module, int channel, const char* label)
+{
+    int status;
+
+    FalconXNDetector* fDetector;
+
+    ChannelState channelState;
+
+    pslLog(PSL_LOG_DEBUG, "Stopping %s on channel %s:%d",
+           label, module->alias, channel);
+
+    /*
+     * Always send. Do not check the local state.
+     */
+    status = psl__StopDataAcquisition(module, channel, false);
+    if (status != XIA_SUCCESS) {
+        pslLog(PSL_LOG_ERROR, status,
+               "Unable to stop %s transfer: %s:%d", label, module->alias, channel);
+        return status;
+    }
+
+    fDetector = psl__FindDetector(module, channel);
+
+    status = psl__DetectorLock(fDetector);
+    if (status != XIA_SUCCESS) {
+        return status;
+    }
+
+    /*
+     * Wait for the ready state.
+     */
+    channelState = fDetector->channelState;
+
+    if (channelState != ChannelReady) {
+        psl__DetectorAsyncPrime(fDetector);
+    }
+
+    status = psl__DetectorUnlock(fDetector);
+    if (status != XIA_SUCCESS) {
+        return status;
+    }
+
+    if (channelState != ChannelReady) {
+        status = psl__DetectorWait(fDetector,
+                                   FALCONXN_CHANNEL_STATE_TIMEOUT * 1000);
+        if (status != XIA_SUCCESS) {
+            pslLog(PSL_LOG_ERROR, status,
+                   "Stop run data error or timeout");
+            return status;
+        }
+    }
+
+    return status;
+}
+
 PSL_STATIC int psl__StartHistogram(Module* module, int channel)
 {
     int status;
@@ -3834,7 +3913,7 @@ PSL_STATIC int psl__StartHistogram(Module* module, int channel)
     uint8_t    pad[256];
     SincBuffer packet = PSL_SINC_BUFFER_INIT(pad);
 
-    boolean_t state_Is_ChannelHistogram = FALSE_;
+    ChannelState channelState;
 
     FalconXNDetector* fDetector;
 
@@ -3848,17 +3927,14 @@ PSL_STATIC int psl__StartHistogram(Module* module, int channel)
         return status;
     }
 
-    if (fDetector->channelState == ChannelHistogram) {
-        pslLog(PSL_LOG_DEBUG, "Channel state is histogram");
-        state_Is_ChannelHistogram = TRUE_;
-    }
+    channelState = fDetector->channelState;
 
     status = psl__DetectorUnlock(fDetector);
     if (status != XIA_SUCCESS) {
         return status;
     }
 
-    if (!state_Is_ChannelHistogram) {
+    if (channelState == ChannelReady) {
         SincEncodeStartHistogram(&packet, channel);
 
         status = psl__ModuleTransactionSend(module, &packet);
@@ -3885,11 +3961,10 @@ PSL_STATIC int psl__StartHistogram(Module* module, int channel)
         }
 
         /*
-         * Wait for the histo state.
+         * Wait for the histo state if not in the hist state.
          */
-        if (fDetector->channelState == ChannelHistogram) {
-            state_Is_ChannelHistogram = TRUE_;
-        } else {
+        channelState = fDetector->channelState;
+        if (fDetector->channelState != ChannelHistogram) {
             fDetector->asyncReady = TRUE_;
         }
 
@@ -3898,7 +3973,7 @@ PSL_STATIC int psl__StartHistogram(Module* module, int channel)
             return status;
         }
 
-        if (!state_Is_ChannelHistogram) {
+        if (fDetector->channelState != ChannelHistogram) {
             status = psl__DetectorWait(fDetector,
                                        FALCONXN_CHANNEL_STATE_TIMEOUT * 1000);
             if (status != XIA_SUCCESS) {
@@ -3909,30 +3984,34 @@ PSL_STATIC int psl__StartHistogram(Module* module, int channel)
             }
         }
     }
+    else if (channelState == ChannelHistogram) {
+        pslLog(PSL_LOG_DEBUG, "Channel state is already in histogram mode");
+    }
+    else {
+        pslLog(PSL_LOG_DEBUG, "Channel state is not ready; check the mode");
+    }
 
     return status;
 }
 
 PSL_STATIC int psl__StopHistogram(Module* module, int channel)
 {
+    return psl__StopAcquisition(module, channel, "Histogram");
+}
+
+PSL_STATIC int psl__StartListMode(Module* module, int channel)
+{
     int status;
+
+    uint8_t    pad[256];
+    SincBuffer packet = SINC_BUFFER_INIT(pad);
+
+    ChannelState channelState;
 
     FalconXNDetector* fDetector;
 
-    boolean_t state_Is_ChannelReady = FALSE_;
-
-    pslLog(PSL_LOG_DEBUG, "Stopping Histograms on channel %s:%d",
+    pslLog(PSL_LOG_DEBUG, "Starting ListMode on channel %s:%d",
            module->alias, channel);
-
-    /*
-     * Always send. Do not check the local state.
-     */
-    status = psl__StopDataAcquisition(module, channel, false);
-    if (status != XIA_SUCCESS) {
-        pslLog(PSL_LOG_ERROR, status,
-               "Unable to stop histogram transfer: %s:%d", module->alias, channel);
-        return status;
-    }
 
     fDetector = psl__FindDetector(module, channel);
 
@@ -3941,32 +4020,76 @@ PSL_STATIC int psl__StopHistogram(Module* module, int channel)
         return status;
     }
 
-    /*
-     * Wait for the ready state.
-     */
-
-    if (fDetector->channelState == ChannelReady) {
-        state_Is_ChannelReady = TRUE_;
-    } else {
-        fDetector->asyncReady = TRUE_;
-    }
+    channelState = fDetector->channelState;
 
     status = psl__DetectorUnlock(fDetector);
     if (status != XIA_SUCCESS) {
         return status;
     }
 
-    if (!state_Is_ChannelReady) {
-        status = psl__DetectorWait(fDetector,
-                                   FALCONXN_CHANNEL_STATE_TIMEOUT * 1000);
+    if (channelState == ChannelReady) {
+        SincEncodeStartListMode(&packet, channel);
+
+        status = psl__ModuleTransactionSend(module, &packet);
         if (status != XIA_SUCCESS) {
             pslLog(PSL_LOG_ERROR, status,
-                   "Stop run data error or timeout");
+                   "Error starting listmode transfer");
             return status;
         }
+
+        status = psl__CheckSuccessResponse(module);
+
+        psl__ModuleTransactionEnd(module);
+
+        if (status != XIA_SUCCESS) {
+            pslLog(PSL_LOG_ERROR, status,
+                   "Unable to start the run for channel %s:%d",
+                   module->alias, channel);
+            return status;
+        }
+
+        status = psl__DetectorLock(fDetector);
+        if (status != XIA_SUCCESS) {
+            return status;
+        }
+
+        /*
+         * Wait for the listmode state if not in the listmode state.
+         */
+        channelState = fDetector->channelState;
+        if (fDetector->channelState != ChannelListMode) {
+            psl__DetectorAsyncPrime(fDetector);
+        }
+
+        status = psl__DetectorUnlock(fDetector);
+        if (status != XIA_SUCCESS) {
+            return status;
+        }
+
+        if (fDetector->channelState != ChannelListMode) {
+            status = psl__DetectorWait(fDetector,
+                                       FALCONXN_CHANNEL_STATE_TIMEOUT * 1000);
+            if (status != XIA_SUCCESS) {
+                pslLog(PSL_LOG_ERROR, status,
+                       "Start run data error or timeout for channel %s:%d",
+                       module->alias, channel);
+                return status;
+            }
+        }
+    }
+    else if (channelState == ChannelListMode) {
+        pslLog(PSL_LOG_DEBUG, "Channel state is already in listmode");
+    }
+    else {
+        pslLog(PSL_LOG_DEBUG, "Channel state is not ready; check the mode");
     }
 
     return status;
+}
+
+PSL_STATIC int psl__StopListMode(Module* module, int channel)
+{
+    return psl__StopAcquisition(module, channel, "ListMode");
 }
 
 PSL_STATIC int psl__Stop_MappingMode_0(Module* module)
@@ -3977,7 +4100,8 @@ PSL_STATIC int psl__Stop_MappingMode_0(Module* module)
     int channel;
 
     for (channel = 0; channel < (int) module->number_of_channels; channel++) {
-        if (module->channels[channel] == DISABLED_CHANNEL) continue;
+        if (module->channels[channel] == DISABLED_CHANNEL)
+            continue;
 
         /*
          * Latch the first error we see and return that. Continue and
@@ -4004,7 +4128,8 @@ PSL_STATIC int psl__Start_MappingMode_0(unsigned short resume,
     UNUSED(resume);
 
     for (channel = 0; channel < (int) module->number_of_channels; channel++) {
-        if (module->channels[channel] == DISABLED_CHANNEL) continue;
+        if (module->channels[channel] == DISABLED_CHANNEL)
+            continue;
 
         FalconXNDetector* fDetector;
         uint32_t          number_stats;
@@ -4111,7 +4236,8 @@ PSL_STATIC int psl__Start_MappingMode_0(unsigned short resume,
      * Return on any error stopping all channels.
      */
     for (channel = 0; channel < (int) module->number_of_channels; channel++) {
-        if (module->channels[channel] == DISABLED_CHANNEL) continue;
+        if (module->channels[channel] == DISABLED_CHANNEL)
+            continue;
 
         FalconXNDetector* fDetector = psl__FindDetector(module, channel);
         ASSERT(fDetector);
@@ -4144,7 +4270,8 @@ PSL_STATIC int psl__Stop_MappingMode_1(Module* module)
     int channel;
 
     for (channel = 0; channel < (int) module->number_of_channels; channel++) {
-        if (module->channels[channel] == DISABLED_CHANNEL) continue;
+        if (module->channels[channel] == DISABLED_CHANNEL)
+            continue;
 
         /*
          * Latch the first error we see and return that. Continue and
@@ -4197,7 +4324,8 @@ PSL_STATIC int psl__Start_MappingMode_1(unsigned short resume, Module* module)
      * Update settings for mm1.
      */
     for (channel = 0; channel < (int) module->number_of_channels; channel++) {
-        if (module->channels[channel] == DISABLED_CHANNEL) continue;
+        if (module->channels[channel] == DISABLED_CHANNEL)
+            continue;
 
         acqValue number_mca_channels;
         acqValue num_map_pixels;
@@ -4319,7 +4447,8 @@ PSL_STATIC int psl__Start_MappingMode_1(unsigned short resume, Module* module)
      * Return on any error stopping all channels.
      */
     for (channel = 0; channel < (int) module->number_of_channels; channel++) {
-        if (module->channels[channel] == DISABLED_CHANNEL) continue;
+        if (module->channels[channel] == DISABLED_CHANNEL)
+            continue;
 
         FalconXNDetector* fDetector = psl__FindDetector(module, channel);
         ASSERT(fDetector);
@@ -4333,6 +4462,147 @@ PSL_STATIC int psl__Start_MappingMode_1(unsigned short resume, Module* module)
         status = psl__StartHistogram(module, channel);
         if (status != XIA_SUCCESS) {
             psl__Stop_MappingMode_1(module);
+            return status;
+        }
+    }
+
+    return XIA_SUCCESS;
+}
+
+PSL_STATIC int psl__Stop_MappingMode_3(Module* module)
+{
+    int status = XIA_SUCCESS;
+    int cstatus = XIA_SUCCESS;
+
+    int channel;
+
+    for (channel = 0; channel < (int) module->number_of_channels; channel++) {
+        if (module->channels[channel] == DISABLED_CHANNEL)
+            continue;
+
+        /*
+         * Latch the first error we see and return that. Continue and
+         * attempt to stop all channels.
+         */
+        if ((status == XIA_SUCCESS) && (cstatus != XIA_SUCCESS))
+            status = cstatus;
+
+        cstatus = psl__StopListMode(module, channel);
+    }
+
+    if ((status == XIA_SUCCESS) && (cstatus != XIA_SUCCESS))
+        status = cstatus;
+
+    return status;
+}
+
+PSL_STATIC int psl__Start_MappingMode_3(unsigned short resume,
+                                        Module*        module)
+{
+    int status = XIA_SUCCESS;
+    FalconXNModule* fModule = module->pslData;
+    int channel;
+
+    UNUSED(resume);
+
+    for (channel = 0; channel < (int) module->number_of_channels; channel++) {
+        if (module->channels[channel] == DISABLED_CHANNEL)
+            continue;
+
+        FalconXNDetector* fDetector;
+
+        fDetector = psl__FindDetector(module, channel);
+        ASSERT(fDetector);
+
+        /* Translate preset_type to SINC's histogram mode */
+        status = psl__SyncPresetType(module, fDetector);
+        if (status != XIA_SUCCESS) {
+            pslLog(PSL_LOG_ERROR, status,
+                   "Error syncing the preset type for starting mm3: %s:%d",
+                   module->alias, channel);
+            psl__Stop_MappingMode_3(module);
+            return status;
+        }
+
+        /*
+         * Set the refresh to the configured value since mm1 could have
+         * set it to a large value.
+         */
+        status = psl__SyncMCARefresh(module, fDetector);
+        if (status != XIA_SUCCESS) {
+            pslLog(PSL_LOG_ERROR, status,
+                   "Error syncing mca_refresh for starting mm3: %s:%d",
+                   module->alias, channel);
+            psl__Stop_MappingMode_3(module);
+            return status;
+        }
+
+        status = psl__SyncGateVetoMode(module, fDetector);
+        if (status != XIA_SUCCESS) {
+            pslLog(PSL_LOG_ERROR, status,
+                   "Error syncing gate veto mode for starting mm3: %s:%d",
+                   module->alias, channel);
+            psl__Stop_MappingMode_3(module);
+            return status;
+        }
+
+        status = psl__DetectorLock(fDetector);
+        if (status != XIA_SUCCESS)
+            return status;
+
+        /*
+         * Close the last mapping mode control.
+         */
+        status = psl__MappingModeControl_CloseAny(&fDetector->mmc);
+        if (status != XIA_SUCCESS) {
+            psl__DetectorUnlock(fDetector);
+            pslLog(PSL_LOG_ERROR, status,
+                   "Error closing the last mapping mode control");
+            psl__Stop_MappingMode_3(module);
+            return status;
+        }
+
+        status = psl__MappingModeControl_OpenMM3(&fDetector->mmc,
+                                                 fDetector->detChan,
+                                                 fModule->runNumber,
+                                                 0);
+
+        if (status != XIA_SUCCESS) {
+            psl__DetectorUnlock(fDetector);
+            pslLog(PSL_LOG_ERROR, status,
+                   "Error opening the mapping mode control");
+            psl__Stop_MappingMode_3(module);
+            return status;
+        }
+
+        status = psl__DetectorUnlock(fDetector);
+        if (status != XIA_SUCCESS)
+            return status;
+    }
+
+    /*
+     * Start the run one channel at a time for all channels in the module for
+     * Handel multi-channel device compatibility. Skip channels which do not
+     * have valid pulse calibration.
+     *
+     * Return on any error stopping all channels.
+     */
+    for (channel = 0; channel < (int) module->number_of_channels; channel++) {
+        if (module->channels[channel] == DISABLED_CHANNEL)
+            continue;
+
+        FalconXNDetector* fDetector = psl__FindDetector(module, channel);
+        ASSERT(fDetector);
+
+        if (!psl__GetCalibrated(module, fDetector)) {
+            pslLog(PSL_LOG_INFO, "Skip run for uncalibrated channel "
+                    "%s:%d", module->alias, channel);
+            continue;
+        }
+
+        status = psl__StartListMode(module, channel);
+        if (status != XIA_SUCCESS) {
+            psl__Stop_MappingMode_3(module);
             return status;
         }
     }
@@ -4371,6 +4641,9 @@ PSL_STATIC int psl__StartRun(int detChan, unsigned short resume, XiaDefaults *de
     case 1:
         status = psl__Start_MappingMode_1(resume, module);
         break;
+    case 3:
+        status = psl__Start_MappingMode_3(resume, module);
+        break;
     default:
         status = XIA_INVALID_VALUE;
         pslLog(PSL_LOG_ERROR, status,
@@ -4408,6 +4681,8 @@ PSL_STATIC int psl__StopRun(int detChan, Detector *detector, Module *module)
         return psl__Stop_MappingMode_0(module);
     case 1:
         return psl__Stop_MappingMode_1(module);
+    case 3:
+        return psl__Stop_MappingMode_3(module);
     default:
         status = XIA_INVALID_VALUE;
         pslLog(PSL_LOG_ERROR, status,
@@ -4421,16 +4696,66 @@ PSL_STATIC int psl__StopRun(int detChan, Detector *detector, Module *module)
  * the given mode and the current state is running or ready. That
  * means it is valid to read the mapping data for that mode.
  */
-PSL_STATIC bool psl__RunningOrReady(FalconXNDetector* fDetector, MM_Mode mode)
+PSL_STATIC bool psl__RunningOrReady(FalconXNDetector* fDetector,
+                                    ChannelState state,
+                                    MM_Mode mode)
 {
-    return (fDetector->channelState == ChannelHistogram ||
+    return ((fDetector->channelState == state ||
             fDetector->channelState == ChannelReady) &&
-        psl__MappingModeControl_IsMode(&fDetector->mmc, mode);
+            psl__MappingModeControl_IsMode(&fDetector->mmc, mode));
 }
 
 PSL_STATIC bool psl__mm1_RunningOrReady(FalconXNDetector* fDetector)
 {
-    return psl__RunningOrReady(fDetector, MAPPING_MODE_MCA_FSM);
+    return psl__RunningOrReady(fDetector,
+                               ChannelHistogram,
+                               MAPPING_MODE_MCA_FSM);
+}
+
+PSL_STATIC bool psl__mm3_RunningOrReady(FalconXNDetector* fDetector)
+{
+    return psl__RunningOrReady(fDetector,
+                               ChannelListMode,
+                               MAPPING_MODE_LIST);
+}
+
+PSL_STATIC int psl_mm_BufferDone(int modChan, Module* module,
+                                  MM_Buffers* mmb, const char* selector)
+{
+    int status = XIA_SUCCESS;
+
+    char      buffer;
+    char      active;
+    boolean_t swapped;
+
+    if ((*selector == 'A') || (*selector == 'a'))
+        buffer = 'A';
+    else if ((*selector == 'B') || (*selector == 'b'))
+        buffer = 'B';
+    else
+        buffer = '?';
+
+    active = psl__MappingModeBuffers_Active_Label(mmb);
+
+    if (buffer != active) {
+        status = XIA_NOT_ACTIVE;
+        pslLog(PSL_LOG_ERROR, status,
+               "Buffer %c is not active, cannot signal done on it: %s:%d",
+               buffer, module->alias, modChan);
+    } else {
+        psl__MappingModeBuffers_Active_Clear(mmb);
+    }
+
+    /*
+     * Update the buffers incase Next is full.
+     */
+    swapped = psl__MappingModeBuffers_Update(mmb);
+    if (swapped) {
+        pslLog(PSL_LOG_INFO,
+               "A/B buffers swapped: %s:%d", module->alias, modChan);
+    }
+
+    return status;
 }
 
 PSL_STATIC int psl__mm0_mca_length(int detChan,
@@ -4751,7 +5076,8 @@ PSL_STATIC int psl__mm0_module_statistics_2(int detChan,
 
     /* Read out all stats for the module per the module_statistics_2 spec. */
     for (channel = 0; channel < (int) module->number_of_channels; channel++) {
-        if (module->channels[channel] == DISABLED_CHANNEL) continue;
+        if (module->channels[channel] == DISABLED_CHANNEL)
+            continue;
 
         int       i, j;
         FalconXNDetector* fDetector = psl__FindDetector(module, channel);
@@ -5198,9 +5524,9 @@ PSL_STATIC int psl__mm1_buffer_len(int detChan,
 
 
     *((unsigned long*) value)
-        = (unsigned long) psl__MappingModeControl_MM1BufferSize(
-                                                                (uint16_t)number_mca_channels.ref.i,
-                                                                num_map_pixels_per_buffer.ref.i);
+        = (unsigned long)
+        psl__MappingModeControl_MM1BufferSize((uint16_t) number_mca_channels.ref.i,
+                                              num_map_pixels_per_buffer.ref.i);
 
     status = psl__DetectorUnlock(fDetector);
     if (status != XIA_SUCCESS) {
@@ -5232,39 +5558,8 @@ PSL_STATIC int psl__mm1_buffer_done(int detChan,
     }
 
     if (psl__mm1_RunningOrReady(fDetector)) {
-        MMC1_Data*  mm1 = psl__MappingModeControl_MM1Data(&fDetector->mmc);
-        MM_Buffers* mmb = &mm1->buffers;
-        const char* selector = (const char*) value;
-        char        buffer;
-        char        active;
-        boolean_t   swapped;
-
-        if ((*selector == 'A') || (*selector == 'a'))
-            buffer = 'A';
-        else if ((*selector == 'B') || (*selector == 'b'))
-            buffer = 'B';
-        else
-            buffer = '?';
-
-        active = psl__MappingModeBuffers_Active_Label(mmb);
-
-        if (buffer != active) {
-            status = XIA_NOT_ACTIVE;
-            pslLog(PSL_LOG_ERROR, status,
-                   "Buffer %c is not active, cannot signal done on it: %s:%d",
-                   buffer, module->alias, modChan);
-        } else {
-            psl__MappingModeBuffers_Active_Clear(mmb);
-        }
-
-        /*
-         * Update the buffers incase Next is full.
-         */
-        swapped = psl__MappingModeBuffers_Update(mmb);
-        if (swapped) {
-            pslLog(PSL_LOG_INFO,
-                   "A/B buffers swapped: %s:%d", module->alias, modChan);
-        }
+        MMC1_Data* mm1 = psl__MappingModeControl_MM1Data(&fDetector->mmc);
+        status = psl_mm_BufferDone(modChan, module, &mm1->buffers, (const char*) value);
     } else {
         status = XIA_NOT_ACTIVE;
         pslLog(PSL_LOG_ERROR, status,
@@ -5410,10 +5705,12 @@ PSL_STATIC int psl__mm1_current_pixel(int detChan,
         return status;
     }
 
-    if (psl__mm1_RunningOrReady(fDetector)) {
+    if ((fDetector->channelState == ChannelHistogram) &&
+        psl__MappingModeControl_IsMode(&fDetector->mmc, MAPPING_MODE_MCA_FSM)) {
         MMC1_Data* mm1 = psl__MappingModeControl_MM1Data(&fDetector->mmc);
         MM_Buffers* mmb = &mm1->buffers;
-        *((unsigned long*) value) = (unsigned long) psl__MappingModeBuffers_Next_PixelTotal(mmb);
+        *((unsigned long*) value) =
+            (unsigned long) psl__MappingModeBuffers_Next_PixelTotal(mmb);
     } else {
         status = XIA_NOT_ACTIVE;
         pslLog(PSL_LOG_ERROR, status,
@@ -5451,7 +5748,8 @@ PSL_STATIC int psl__mm1_buffer_overrun(int detChan,
         return status;
     }
 
-    if (psl__mm1_RunningOrReady(fDetector)) {
+    if ((fDetector->channelState == ChannelHistogram) &&
+        psl__MappingModeControl_IsMode(&fDetector->mmc, MAPPING_MODE_MCA_FSM)) {
         MMC1_Data*  mm1 = psl__MappingModeControl_MM1Data(&fDetector->mmc);
         MM_Buffers* mmb = &mm1->buffers;
         uint32_t    overruns = psl__MappingModeBuffers_Overruns(mmb);
@@ -5534,7 +5832,431 @@ PSL_STATIC int psl__mm1_mapping_pixel_next(int detChan,
 }
 
 /*
+ * MCA mapping run_active. The run data member is documented on the mm0 routine.
+ */
+PSL_STATIC int psl__mm3_run_active(int detChan,
+                                   int modChan, Module* module,
+                                   const char *name, void *value)
+{
+    int status = XIA_SUCCESS;
+    FalconXNDetector* fDetector = psl__FindDetector(module, modChan);
+
+    UNUSED(detChan);
+    UNUSED(name);
+    UNUSED(module);
+
+    *((unsigned long*) value) = 0;
+
+    status = psl__DetectorLock(fDetector);
+    if (status != XIA_SUCCESS) {
+        pslLog(PSL_LOG_ERROR, status,
+               "Unable to lock the detector: %s:%d", module->alias, modChan);
+        return status;
+    }
+
+    MMC3_Data*  mm3;
+    MM_Buffers* mmb;
+
+    mm3 = psl__MappingModeControl_MM3Data(&fDetector->mmc);
+    mmb = &mm3->buffers;
+
+
+    if ((fDetector->channelState == ChannelListMode) &&
+        psl__MappingModeControl_IsMode(&fDetector->mmc, MAPPING_MODE_LIST)) {
+        *((unsigned long*) value) = 1;
+    }
+
+    pslLog(PSL_LOG_INFO, "Active state %d: %s",
+           detChan, *((int*) value) ? "ACTIVE" : "ready");
+
+    status = psl__DetectorUnlock(fDetector);
+    if (status != XIA_SUCCESS) {
+        pslLog(PSL_LOG_ERROR, status,
+               "Unable to unlock the detector: %s:%d", module->alias, modChan);
+    }
+
+    return status;
+}
+
+PSL_STATIC int psl__mm3_buffer_full_a(int detChan,
+                                      int modChan, Module* module,
+                                      const char *name, void *value)
+{
+    int status = XIA_SUCCESS;
+    int sstatus;
+
+    UNUSED(detChan);
+    UNUSED(module);
+    UNUSED(name);
+
+    FalconXNDetector* fDetector = psl__FindDetector(module, modChan);
+
+    *((int*) value) = 0;
+
+    status = psl__DetectorLock(fDetector);
+    if (status != XIA_SUCCESS) {
+        pslLog(PSL_LOG_ERROR, status,
+               "Unable to lock the detector: %s:%d", module->alias, modChan);
+        return status;
+    }
+
+    if (psl__mm3_RunningOrReady(fDetector)) {
+        MMC3_Data* mm3 = psl__MappingModeControl_MM3Data(&fDetector->mmc);
+        if (psl__MappingModeBuffers_A_Full(&mm3->buffers))
+            *((int*) value) = 1;
+    } else {
+        status = XIA_NOT_ACTIVE;
+        pslLog(PSL_LOG_ERROR, status,
+               "Not running or not MM3 mode: %s:%d", module->alias, modChan);
+    }
+
+    sstatus = psl__DetectorUnlock(fDetector);
+    if (sstatus != XIA_SUCCESS) {
+        pslLog(PSL_LOG_ERROR, sstatus,
+               "Unable to unlock the detector: %s:%d", module->alias, modChan);
+        if (status == XIA_SUCCESS)
+            status = sstatus;
+    }
+
+    return status;
+}
+
+PSL_STATIC int psl__mm3_buffer_full_b(int detChan,
+                                      int modChan, Module* module,
+                                      const char *name, void *value)
+{
+    int status = XIA_SUCCESS;
+    int sstatus;
+
+    UNUSED(detChan);
+    UNUSED(module);
+    UNUSED(name);
+
+    FalconXNDetector* fDetector = psl__FindDetector(module, modChan);
+
+    *((int*) value) = 0;
+
+    status = psl__DetectorLock(fDetector);
+    if (status != XIA_SUCCESS) {
+        pslLog(PSL_LOG_ERROR, status,
+               "Unable to lock the detector: %s:%d", module->alias, modChan);
+        return status;
+    }
+
+    if (psl__mm3_RunningOrReady(fDetector)) {
+        MMC3_Data* mm3 = psl__MappingModeControl_MM3Data(&fDetector->mmc);
+        if (psl__MappingModeBuffers_B_Full(&mm3->buffers))
+            *((int*) value) = 1;
+    } else {
+        status = XIA_NOT_ACTIVE;
+        pslLog(PSL_LOG_ERROR, status,
+               "Not running or not MM1 mode: %s:%d", module->alias, modChan);
+    }
+
+    sstatus = psl__DetectorUnlock(fDetector);
+    if (sstatus != XIA_SUCCESS) {
+        pslLog(PSL_LOG_ERROR, sstatus,
+               "Unable to unlock the detector: %s:%d", module->alias, modChan);
+        if (status == XIA_SUCCESS)
+            status = sstatus;
+    }
+
+    return status;
+}
+
+PSL_STATIC int psl__mm3_buffer_len(int detChan,
+                                   int modChan, Module* module,
+                                   const char *name, void *value)
+{
+    int status = XIA_SUCCESS;
+
+    FalconXNDetector* fDetector = psl__FindDetector(module, modChan);
+
+    MM_Control* mmc = NULL;
+
+    UNUSED(detChan);
+    UNUSED(module);
+    UNUSED(name);
+
+    *((int*) value) = 0;
+
+    status = psl__DetectorLock(fDetector);
+    if (status != XIA_SUCCESS) {
+        pslLog(PSL_LOG_ERROR, status,
+               "Unable to lock the detector: %s:%d", module->alias, modChan);
+        return status;
+    }
+
+    if (psl__mm3_RunningOrReady(fDetector))
+        mmc = &fDetector->mmc;
+
     *((unsigned long*) value) = (unsigned long)psl__MappingModeControl_MM3BufferSize(mmc);
+
+    status = psl__DetectorUnlock(fDetector);
+    if (status != XIA_SUCCESS) {
+        pslLog(PSL_LOG_ERROR, status,
+               "Unable to unlock the detector: %s:%d", module->alias, modChan);
+    }
+
+    return status;
+}
+
+PSL_STATIC int psl__mm3_buffer_done(int detChan,
+                                    int modChan, Module* module,
+                                    const char *name, void *value)
+{
+    int status = XIA_SUCCESS;
+    int sstatus;
+
+    FalconXNDetector* fDetector = psl__FindDetector(module, modChan);
+
+    UNUSED(detChan);
+    UNUSED(module);
+    UNUSED(name);
+
+    status = psl__DetectorLock(fDetector);
+    if (status != XIA_SUCCESS) {
+        pslLog(PSL_LOG_ERROR, status,
+               "Unable to lock the detector: %s:%d", module->alias, modChan);
+        return status;
+    }
+
+    if (psl__mm3_RunningOrReady(fDetector)) {
+        MMC3_Data* mm3 = psl__MappingModeControl_MM3Data(&fDetector->mmc);
+        status = psl_mm_BufferDone(modChan, module, &mm3->buffers, (const char*) value);
+    } else {
+        status = XIA_NOT_ACTIVE;
+        pslLog(PSL_LOG_ERROR, status,
+               "Not running or not MM1 mode: %s:%d", module->alias, modChan);
+    }
+
+    sstatus = psl__DetectorUnlock(fDetector);
+    if (sstatus != XIA_SUCCESS) {
+        pslLog(PSL_LOG_ERROR, sstatus,
+               "Unable to unlock the detector: %s:%d", module->alias, modChan);
+        if (status == XIA_SUCCESS)
+            status = sstatus;
+    }
+
+    return status;
+}
+
+PSL_STATIC int psl__mm3_buffer(const char buffer,
+                               int detChan,
+                               int modChan, Module* module,
+                               const char *name, void *value)
+{
+    int status = XIA_SUCCESS;
+    int sstatus;
+
+    FalconXNDetector* fDetector = psl__FindDetector(module, modChan);
+
+    UNUSED(detChan);
+    UNUSED(module);
+    UNUSED(name);
+
+    status = psl__DetectorLock(fDetector);
+    if (status != XIA_SUCCESS) {
+        pslLog(PSL_LOG_ERROR, status,
+               "Unable to lock the detector: %s:%d", module->alias, modChan);
+        return status;
+    }
+
+    if (psl__mm3_RunningOrReady(fDetector)) {
+        MMC3_Data* mm3 = psl__MappingModeControl_MM3Data(&fDetector->mmc);
+        MM_Buffers* mmb = &mm3->buffers;
+        boolean_t active;
+
+        if (buffer == 'A')
+            active = psl__MappingModeBuffers_A_Active(mmb);
+        else
+            active = psl__MappingModeBuffers_B_Active(mmb);
+
+        if (active) {
+            size_t size = 0;
+            status = psl__MappingModeBuffers_CopyOut(mmb, value, &size);
+            if (status != XIA_SUCCESS) {
+                pslLog(PSL_LOG_ERROR, status,
+                       "Error coping buffer %c data: %s:%d",
+                       buffer, module->alias, modChan);
+            }
+        } else {
+            status = XIA_NOT_IDLE;
+            pslLog(PSL_LOG_ERROR, status,
+                   "Buffer %c is active, cannot get copy: %s:%d",
+                   buffer, module->alias, modChan);
+        }
+    } else {
+        status = XIA_NOT_ACTIVE;
+        pslLog(PSL_LOG_ERROR, status,
+               "Not running or not MM3 mode: %s:%d", module->alias, modChan);
+    }
+
+    sstatus = psl__DetectorUnlock(fDetector);
+    if (sstatus != XIA_SUCCESS) {
+        pslLog(PSL_LOG_ERROR, sstatus,
+               "Unable to unlock the detector: %s:%d", module->alias, modChan);
+        if (status == XIA_SUCCESS)
+            status = sstatus;
+    }
+
+    return status;
+}
+
+PSL_STATIC int psl__mm3_buffer_a(int detChan,
+                                 int modChan, Module* module,
+                                 const char *name, void *value)
+{
+    return psl__mm3_buffer('A', detChan, modChan, module, name, value);
+}
+
+PSL_STATIC int psl__mm3_buffer_b(int detChan,
+                                 int modChan, Module* module,
+                                 const char *name, void *value)
+{
+    return psl__mm3_buffer('B', detChan, modChan, module, name, value);
+}
+
+
+PSL_STATIC int psl__mm3_current_pixel(int detChan,
+                                      int modChan, Module* module,
+                                      const char *name, void *value)
+{
+    UNUSED(detChan);
+    UNUSED(module);
+    UNUSED(name);
+    UNUSED(modChan);
+    UNUSED(value);
+
+    int status = XIA_SUCCESS;
+    return status;
+}
+
+PSL_STATIC int psl__mm3_buffer_overrun(int detChan,
+                                       int modChan, Module* module,
+                                       const char *name, void *value)
+{
+    int status = XIA_SUCCESS;
+    int sstatus;
+
+    FalconXNDetector* fDetector = psl__FindDetector(module, modChan);
+
+    UNUSED(detChan);
+    UNUSED(module);
+    UNUSED(name);
+
+    status = psl__DetectorLock(fDetector);
+    if (status != XIA_SUCCESS) {
+        pslLog(PSL_LOG_ERROR, status,
+               "Unable to lock the detector: %s:%d", module->alias, modChan);
+        return status;
+    }
+
+    if ((fDetector->channelState == ChannelListMode) &&
+        psl__MappingModeControl_IsMode(&fDetector->mmc, MAPPING_MODE_LIST)) {
+        MMC3_Data*  mm3 = psl__MappingModeControl_MM3Data(&fDetector->mmc);
+        MM_Buffers* mmb = &mm3->buffers;
+        uint32_t    overruns = psl__MappingModeBuffers_Overruns(mmb);
+
+        if (overruns) {
+            pslLog(PSL_LOG_INFO,
+                   "Overrun count %d: %s:%d", (int) overruns, module->alias, modChan);
+            *((int*) value) = 1;
+        } else {
+            *((int*) value) = 0;
+        }
+    } else {
+        status = XIA_NOT_ACTIVE;
+        pslLog(PSL_LOG_ERROR, status,
+               "Not running or not MM1 mode: %s:%d", module->alias, modChan);
+    }
+
+    sstatus = psl__DetectorUnlock(fDetector);
+    if (sstatus != XIA_SUCCESS) {
+        pslLog(PSL_LOG_ERROR, sstatus,
+               "Unable to unlock the detector: %s:%d", module->alias, modChan);
+        if (status == XIA_SUCCESS)
+            status = sstatus;
+    }
+
+    return status;
+}
+
+PSL_STATIC int psl__mm3_list_buffer_len(const char buffer,
+                                        int detChan,
+                                        int modChan, Module* module,
+                                        const char *name, void *value)
+{
+    int status = XIA_SUCCESS;
+    int sstatus;
+
+    FalconXNDetector* fDetector = psl__FindDetector(module, modChan);
+
+    UNUSED(detChan);
+    UNUSED(module);
+    UNUSED(name);
+
+    status = psl__DetectorLock(fDetector);
+    if (status != XIA_SUCCESS) {
+        pslLog(PSL_LOG_ERROR, status,
+               "Unable to lock the detector: %s:%d", module->alias, modChan);
+        return status;
+    }
+
+    if ((fDetector->channelState == ChannelListMode) &&
+        psl__MappingModeControl_IsMode(&fDetector->mmc, MAPPING_MODE_LIST)) {
+        MMC3_Data*  mm3 = psl__MappingModeControl_MM3Data(&fDetector->mmc);
+        MM_Buffers* mmb = &mm3->buffers;
+        char        active = psl__MappingModeBuffers_Active_Label(mmb);
+
+        if (active != buffer) {
+            size_t level;
+            if (buffer == 'A')
+                level = psl__MappingModeBuffers_A_Level(mmb);
+            else
+                level = psl__MappingModeBuffers_B_Level(mmb);
+            pslLog(PSL_LOG_INFO,
+                   "%c buffer level %d: %s:%d",
+                   buffer, (int) level, module->alias, modChan);
+            *((int*) value) = (int) level;
+        } else {
+            status = XIA_NOT_IDLE;
+            pslLog(PSL_LOG_ERROR, status,
+                   "Buffer %c is active: %s:%d", buffer, module->alias, modChan);
+            *((int*) value) = 0;
+        }
+    } else {
+        status = XIA_NOT_ACTIVE;
+        pslLog(PSL_LOG_ERROR, status,
+               "Not running or not MM3 mode: %s:%d", module->alias, modChan);
+    }
+
+    sstatus = psl__DetectorUnlock(fDetector);
+    if (sstatus != XIA_SUCCESS) {
+        pslLog(PSL_LOG_ERROR, sstatus,
+               "Unable to unlock the detector: %s:%d", module->alias, modChan);
+        if (status == XIA_SUCCESS)
+            status = sstatus;
+    }
+
+    return status;
+}
+
+PSL_STATIC int psl__mm3_list_buffer_len_a(int detChan,
+                                          int modChan, Module* module,
+                                          const char *name, void *value)
+{
+    return psl__mm3_list_buffer_len('A', detChan, modChan, module, name, value);
+}
+
+PSL_STATIC int psl__mm3_list_buffer_len_b(int detChan,
+                                          int modChan, Module* module,
+                                          const char *name, void *value)
+{
+    return psl__mm3_list_buffer_len('B', detChan, modChan, module, name, value);
+}
+
+/*
  * Get run data handlers. The order of the handlers must match the
  * order of the labels.
  */
@@ -5664,6 +6386,36 @@ PSL_STATIC DoRunData_FP getRunDataHandlers[MAPPING_MODE_COUNT][GET_RUN_DATA_HAND
             NULL,   /* psl__mm2_list_buffer_len_b */
             NULL,   /* psl__mm2_mapping_pixel_next */
         },
+        {
+            NULL,   /* psl__mm3_mca_length */
+            NULL,   /* psl__mm3_mca */
+            NULL,   /* psl__mm3_baseline_length */
+            NULL,   /* psl__mm3_runtime */
+            NULL,   /* psl__mm3_realtime */
+            NULL,   /* psl__mm3_trigger_livetime */
+            NULL,   /* psl__mm3_livetime */
+            NULL,   /* psl__mm3_input_count_rate */
+            NULL,   /* psl__mm3_output_count_rate */
+            NULL,   /* psl__mm3_max_sca_length */
+            NULL,   /* psl__mm3_sca_length */
+            NULL,   /* psl__mm3_sca */
+            psl__mm3_run_active,
+            psl__mm3_buffer_len,
+            psl__mm3_buffer_done,
+            psl__mm3_buffer_full_a,
+            psl__mm3_buffer_full_b,
+            psl__mm3_buffer_a,
+            psl__mm3_buffer_b,
+            psl__mm3_current_pixel,
+            psl__mm3_buffer_overrun,
+            NULL,   /* psl__mm3_module_statistics_2 */
+            NULL,   /* psl__mm3_module_mca */
+            NULL,   /* psl__mm3_mca_events */
+            NULL,   /* psl__mm3_total_output_events */
+            psl__mm3_list_buffer_len_a,
+            psl__mm3_list_buffer_len_b,
+            NULL,   /* psl__mm3_mapping_pixel_next */
+        },
     };
 
 PSL_STATIC int psl__GetRunData(int detChan, const char *name, void *value,
@@ -5684,7 +6436,6 @@ PSL_STATIC int psl__GetRunData(int detChan, const char *name, void *value,
     fDetector = psl__FindDetector(module, xiaGetModChan(detChan));
 
     mapping_mode = psl__GetAcqValue(fDetector, "mapping_mode");
-
 
     pslLog(PSL_LOG_DEBUG, "Detector:%d Mapping Mode:%d Name:%s",
            detChan, (int) mapping_mode.ref.i, name);
@@ -5872,7 +6623,8 @@ PSL_STATIC int psl__SpecialRun(int detChan, const char *name, void *info,
     if (STREQ(name, "adc_trace")) {
         double* value = info;
         if (*value <= 0) {
-            pslLog(PSL_LOG_WARNING, "%f is out of range for adc_trace_length. Coercing to %d.",
+            pslLog(PSL_LOG_WARNING,
+                   "%f is out of range for adc_trace_length. Coercing to %d.",
                    *value, 0x2000);
             *value = 0x2000;
         }
@@ -6090,11 +6842,16 @@ PSL_STATIC int psl__LoadChanData(const int modChan, Module *module)
 
     if (buf.length < 1) {
         pslLog(PSL_LOG_INFO, "No characterization data for channel %s:%d",
-               module->alias, modChan);
-        return XIA_NOT_FOUND;
+                module->alias, modChan);
+        status = psl__DetectorLock(fDetector);
+        if (status != XIA_SUCCESS)
+            return status;
+        fDetector->calibrationState = CalibrationNone;
+        psl__DetectorUnlock(fDetector);
+    } else {
+        status = psl__LoadDetCharacterizationS(fDetector, module, (char*)buf.data);
     }
-
-    return psl__LoadDetCharacterizationS(fDetector, module, (char*)buf.data);
+    return status;
 }
 
 PSL_STATIC int psl__SaveChanData(const int modChan, Module *module)
@@ -6168,7 +6925,8 @@ PSL_STATIC int psl__IniWrite(FILE* fp, const char* section, const char* path,
         int modChan;
 
         for (modChan = 0; modChan < (int) module->number_of_channels; modChan++) {
-            if (module->channels[modChan] == DISABLED_CHANNEL) continue;
+            if (module->channels[modChan] == DISABLED_CHANNEL)
+                continue;
             int status;
 
             status = psl__SaveChanData(modChan, module);
@@ -6206,8 +6964,7 @@ PSL_STATIC int psl__ModuleTransactionSend(Module* module, SincBuffer* packet)
      */
     status = SincSend(&fModule->sinc, packet);
     if (status == false) {
-        status = falconXNSincResultToHandel(SincWriteErrorCode(&fModule->sinc),
-                                            SincWriteErrorMessage(&fModule->sinc));
+        status = falconXNSincToHandelError(&fModule->sinc);
         handel_md_mutex_unlock(&fModule->sendLock);
         pslLog(PSL_LOG_ERROR, status,
                "Unable to send to FalconXN connection: %s:%d",
@@ -6236,7 +6993,8 @@ PSL_STATIC int psl__ModuleTransactionReceive(Module* module, Sinc_Response* resp
         /*
          * The sender waits here for the response.
          */
-        status = handel_md_event_wait(&fModule->sendEvent, FALCONXN_RESPONSE_TIMEOUT * 1000);
+        status = handel_md_event_wait(&fModule->sendEvent,
+                                      FALCONXN_RESPONSE_TIMEOUT * 1000);
         if (status != 0) {
             int me = status;
             status = XIA_TIMEOUT;
@@ -6332,11 +7090,7 @@ PSL_STATIC int psl__ModuleResponse(Module* module, int channel, int type, void* 
 
     FalconXNModule* fModule = module->pslData;
 
-    Sinc_Response sresp;
-
-    sresp.channel = channel;
-    sresp.type = type;
-    sresp.response = resp;
+    Sinc_Response sresp = { channel, type, resp };
 
     status = psl__ModuleLock(module);
     if (status != 0) {
@@ -6698,7 +7452,7 @@ PSL_STATIC int psl__ReceiveHistogramData(Module* module, SincBuffer* packet)
                                              &rejected,
                                              &stats);
     if (status != true) {
-        status = falconXNSincErrorToHandel(&se);
+        status = falconXNSincErrorToHandelError(&se);
         pslLog(PSL_LOG_ERROR, status,
                "Decode from FalconXN connection failed: %s:%d",
                fModule->hostAddress, fModule->portBase);
@@ -6719,7 +7473,8 @@ PSL_STATIC int psl__ReceiveHistogramData(Module* module, SincBuffer* packet)
     }
 
     pslLog(PSL_LOG_DEBUG,
-           "Histo Id:%" PRIu64 " elapsed=%0.3f accepted=%" PRIu64 " icr=%0.3f ocr=%0.3f deadtime=%0.3f gate=%d: %s:%d",
+           "Histo Id:%" PRIu64 " elapsed=%0.3f accepted=%" PRIu64 " icr=%0.3f " \
+           "ocr=%0.3f deadtime=%0.3f gate=%d: %s:%d",
            stats.dataSetId,
            stats.timeElapsed,
            stats.pulsesAccepted,
@@ -6774,7 +7529,7 @@ PSL_STATIC int psl__ReceiveHistogramData(Module* module, SincBuffer* packet)
         break;
 
     case MAPPING_MODE_SCA:
-    case MAPPINGMODE_LIST:
+    case MAPPING_MODE_LIST:
     case MAPPING_MODE_COUNT:
     default:
         pslLog(PSL_LOG_ERROR, XIA_INVALID_VALUE,
@@ -6796,12 +7551,197 @@ PSL_STATIC int psl__ReceiveHistogramData(Module* module, SincBuffer* packet)
     return XIA_SUCCESS;
 }
 
+PSL_STATIC int psl__ReceiveListMode_MM3(Module*           module,
+                                        FalconXNDetector* fDetector,
+                                        int               channel,
+                                        MM_Control*       mmc,
+                                        uint8_t*          data,
+                                        int               data_len,
+                                        uint64_t          data_setId)
+{
+    int status = XIA_SUCCESS;
+
+    MMC3_Data* mm3;
+
+    UNUSED(fDetector);
+    UNUSED(module);
+    UNUSED(channel);
+
+    mm3 = psl__MappingModeControl_MM3Data(mmc);
+
+    ++mm3->data_setId;
+
+    if (data_setId != mm3->data_setId) {
+        pslLog(PSL_LOG_WARNING,
+               "Invalid MM3 data set: %zu (looking for: %zu)",
+               data_setId, mm3->data_setId);
+    }
+
+    data_len /= sizeof(uint32_t);
+
+    while (data_len > 0) {
+        MM_Buffers* mmb;
+
+        size_t remaining;
+        size_t copy_len;
+        boolean_t swapped;
+
+        mmb = &mm3->buffers;
+
+        /*
+         * Are the buffers full? Increment the overflow counter. This is used to
+         * signal the user if they call the buffer_overrun call.
+         */
+        if (psl__MappingModeBuffers_Next_Full(mmb)) {
+            psl__MappingModeBuffers_Overrun(mmb);
+            status = XIA_INTERNAL_BUFFER_OVERRUN;
+            pslLog(PSL_LOG_ERROR, status,
+                   "Overflow, next buffer is full: %s:%d", module->alias, channel);
+            return status;
+        }
+
+        /*
+         * If the Next's level is 0 the buffer does not have an XMAP
+         * header. Add it. We always write a pixel into a new buffer.
+         */
+        if (psl__MappingModeBuffers_Next_Level(mmb) == 0) {
+            //status = psl__XMAP_WriteBufferHeader_MM3(mm3);
+            if (status != XIA_SUCCESS) {
+                pslLog(PSL_LOG_ERROR, status,
+                       "Error adding an XMAP buffer header: %s:%d",
+                       module->alias, channel);
+                return status;
+            }
+        }
+
+        remaining = psl__MappingModeBuffers_Next_Remaining(&mm3->buffers);
+        copy_len = (size_t) data_len > remaining ? remaining : (size_t) data_len;
+
+        status = psl__MappingModeBuffers_CopyIn(&mm3->buffers,
+                                                data,
+                                                copy_len);
+        if (status != XIA_SUCCESS) {
+            pslLog(PSL_LOG_ERROR, status,
+                   "Error coping in listmode data: %s:%d", module->alias, channel);
+            return status;
+        }
+
+        data_len -= (int) copy_len;
+
+        /*
+         * Update so any data is waiting for the user to read from the Active buffer.
+         */
+        swapped = psl__MappingModeBuffers_Update(mmb);
+        if (swapped) {
+            pslLog(PSL_LOG_INFO,
+                   "A/B buffers swapped: %s:%d", module->alias, channel);
+        } else if (data_len > 0) {
+            psl__MappingModeBuffers_Overrun(mmb);
+            status = XIA_INTERNAL_BUFFER_OVERRUN;
+            pslLog(PSL_LOG_ERROR, status,
+                   "Overflow, swap falied with more data: %s:%d", module->alias, channel);
+            return status;
+        }
+    }
+
+    return status;
+}
+
 PSL_STATIC int psl__ReceiveListModeData(Module* module, SincBuffer* packet)
 {
-    UNUSED(module);
-    UNUSED(packet);
+    int status;
 
-    pslLog(PSL_LOG_INFO, "No decoder");
+    FalconXNModule* fModule = module->pslData;
+    FalconXNDetector* fDetector;
+
+    int channel = -1;
+
+    uint8_t* data = NULL;
+    int data_len = 0;
+    uint64_t data_setId = 0;
+
+    SincError se;
+
+    MM_Control* mmc;
+
+    status = SincDecodeListModeDataResponse(&se,
+                                            packet,
+                                            &channel,
+                                            &data,
+                                            &data_len,
+                                            &data_setId);
+    if (status != true) {
+        status = falconXNSincErrorToHandelError(&se);
+        pslLog(PSL_LOG_ERROR, status,
+               "Decode from FalconXN connection failed: %s:%d",
+               fModule->hostAddress, fModule->portBase);
+        return status;
+    }
+
+    /* If a previous process was aborted during a run, sometimes we get an extra
+     * histogram data response on startup.
+     */
+    fDetector = psl__FindDetector(module, channel);
+    if (fDetector == NULL) {
+        free(data);
+        status = XIA_INVALID_DETCHAN;
+        pslLog(PSL_LOG_ERROR, status,
+               "Cannot find channel detector: %d", channel);
+        return status;
+    }
+
+    pslLog(PSL_LOG_DEBUG, "ListM: id=%lu len=%d: %s:%d",
+           data_setId, data_len, module->alias, channel);
+
+    status = psl__DetectorLock(fDetector);
+    if (status != XIA_SUCCESS) {
+        free(data);
+        pslLog(PSL_LOG_ERROR, status,
+               "Unable to lock the detector: %s:%d", module->alias, channel);
+        return status;
+    }
+
+    mmc = &fDetector->mmc;
+
+    switch (psl__MappingModeControl_Mode(mmc))
+    {
+    case MAPPING_MODE_NIL:
+        break;
+
+    case MAPPING_MODE_LIST:
+        status = psl__ReceiveListMode_MM3(module,
+                                          fDetector,
+                                          channel,
+                                          mmc,
+                                          data,
+                                          data_len,
+                                          data_setId);
+        if (status != XIA_SUCCESS) {
+            pslLog(PSL_LOG_ERROR, status,
+                   "Error in MM3 listmode receiver: %s:%d", module->alias, channel);
+        }
+        break;
+
+    case MAPPING_MODE_MCA:
+    case MAPPING_MODE_MCA_FSM:
+    case MAPPING_MODE_SCA:
+    case MAPPING_MODE_COUNT:
+    default:
+        pslLog(PSL_LOG_ERROR, XIA_INVALID_VALUE,
+               "Invalid mapping mode (%d): %s:%d",
+               psl__MappingModeControl_Mode(mmc), module->alias, channel);
+        break;
+    }
+
+    status = psl__DetectorUnlock(fDetector);
+    if (status != XIA_SUCCESS) {
+        pslLog(PSL_LOG_ERROR, status,
+               "Unable to unlock the detector: %s:%d", module->alias, channel);
+        /* drop through to free the memory */
+    }
+
+    free(data);
+
     return XIA_SUCCESS;
 }
 
@@ -6826,7 +7766,7 @@ PSL_STATIC int psl__ReceiveOscilloscopeData(Module* module, SincBuffer* packet)
                                                 NULL,
                                                 &raw);
     if (status != true) {
-        status = falconXNSincErrorToHandel(&se);
+        status = falconXNSincErrorToHandelError(&se);
         pslLog(PSL_LOG_ERROR, status,
                "Decode from FalconXN connection failed: %s:%d",
                fModule->hostAddress, fModule->portBase);
@@ -6882,7 +7822,7 @@ PSL_STATIC int psl__ReceiveCalibrationProgress(Module* module, SincBuffer* packe
     if (status != true) {
         if (resp != NULL)
             si_toro__sinc__calibration_progress_response__free_unpacked(resp, NULL);
-        status = falconXNSincErrorToHandel(&se);
+        status = falconXNSincErrorToHandelError(&se);
         pslLog(PSL_LOG_ERROR, status,
                "Decode calibration progress response failed %s:%d",
                module->alias, channel);
@@ -6950,7 +7890,7 @@ PSL_STATIC int psl__ReceiveAsynchronousError(Module* module, SincBuffer* packet)
 
 
     pslLog(PSL_LOG_ERROR, status, "SINC asynchronous error, channel = %d", channel);
-    status = falconXNSincErrorToHandel(&se);
+    status = falconXNSincErrorToHandelError(&se);
 
     /*
      * Parse data dropped errors to manage pixel counts to end the run.
@@ -6993,7 +7933,7 @@ PSL_STATIC int psl__ReceiveAsynchronousError(Module* module, SincBuffer* packet)
         case MAPPING_MODE_MCA:
         case MAPPING_MODE_NIL:
         case MAPPING_MODE_SCA:
-        case MAPPINGMODE_LIST:
+        case MAPPING_MODE_LIST:
         case MAPPING_MODE_COUNT:
         default:
             pslLog(PSL_LOG_ERROR, XIA_INVALID_VALUE,
@@ -7029,7 +7969,7 @@ PSL_STATIC int psl__ReceiveSuccess(Module* module, SincBuffer* packet)
                                        &resp,
                                        &channel);
     if (status != true) {
-        status = falconXNSincErrorToHandel(&se);
+        status = falconXNSincErrorToHandelError(&se);
         psl__ModuleStatusResponse(module, status);
         pslLog(PSL_LOG_ERROR, status,
                "Decode from FalconXN connection failed: %s:%d",
@@ -7058,7 +7998,7 @@ PSL_STATIC int psl__ReceiveGetParam(Module* module, SincBuffer* packet)
                                         &resp,
                                         &channel);
     if (status != true) {
-        status = falconXNSincErrorToHandel(&se);
+        status = falconXNSincErrorToHandelError(&se);
         psl__ModuleStatusResponse(module, status);
         pslLog(PSL_LOG_ERROR, status,
                "Decode from FalconXN connection failed: %s:%d",
@@ -7104,7 +8044,7 @@ PSL_STATIC int psl__ReceiveGetCalibration(Module* module, SincBuffer* packet)
                                               &model,
                                               &final);
     if (status != true) {
-        status = falconXNSincErrorToHandel(&se);
+        status = falconXNSincErrorToHandelError(&se);
         psl__ModuleStatusResponse(module, status);
         pslLog(PSL_LOG_ERROR, status,
                "Unable to get calibration data for channel %d", channel);
@@ -7170,7 +8110,7 @@ PSL_STATIC int psl__ReceiveCalculateDCOffset(Module* module, SincBuffer* packet)
                                                  &dcOffset,
                                                  &channel);
     if (status != true) {
-        status = falconXNSincErrorToHandel(&se);
+        status = falconXNSincErrorToHandelError(&se);
         psl__ModuleStatusResponse(module, status);
         pslLog(PSL_LOG_ERROR, status,
                "Decode from FalconXN connection failed: %s:%d",
@@ -7221,7 +8161,7 @@ PSL_STATIC int psl__ReceiveListParamDetails(Module* module, SincBuffer* packet)
 
     status = SincDecodeListParamDetailsResponse(&se, packet, &resp, &channel);
     if (status != true) {
-        status =  falconXNSincErrorToHandel(&se);
+        status =  falconXNSincErrorToHandelError(&se);
         psl__ModuleStatusResponse(module, status);
         pslLog(PSL_LOG_ERROR, status,
                "Decode from FalconXN connection failed: %s:%d",
@@ -7257,7 +8197,7 @@ PSL_STATIC int psl__ReceiveParamUpdated(Module* module, SincBuffer* packet)
                                             &resp,
                                             &channel);
     if (status != true) {
-        status = falconXNSincErrorToHandel(&se);
+        status = falconXNSincErrorToHandelError(&se);
         psl__ModuleStatusResponse(module, status);
         pslLog(PSL_LOG_ERROR, status,
                "Decode from FalconXN connection failed: %s:%d",
@@ -7324,7 +8264,7 @@ PSL_STATIC int psl__ReceiveParamUpdated(Module* module, SincBuffer* packet)
 PSL_STATIC int psl__UpdateChannelState(SiToro__Sinc__KeyValue* kv,
                                        FalconXNDetector* fDetector)
 {
-    int status;
+    int status = XIA_SUCCESS;
 
     if (kv->optionval) {
         if (strcmp(kv->optionval, "ready") == 0) {
@@ -7337,15 +8277,7 @@ PSL_STATIC int psl__UpdateChannelState(SiToro__Sinc__KeyValue* kv,
                 fDetector->calibrationState = CalibrationNeedRefresh;
 
             fDetector->channelState = ChannelReady;
-            if (fDetector->asyncReady) {
-                fDetector->asyncReady = FALSE_;
-                status = psl__DetectorSignal(fDetector);
-                if (status != XIA_SUCCESS) {
-                    pslLog(PSL_LOG_ERROR, status,
-                           "Detector event signal error");
-                    return status;
-                }
-            }
+            status = psl__DetectorAsyncSignal(fDetector);
         }
         else if (strcmp(kv->optionval, "error") == 0) {
             fDetector->channelState = ChannelError;
@@ -7357,20 +8289,11 @@ PSL_STATIC int psl__UpdateChannelState(SiToro__Sinc__KeyValue* kv,
         }
         else if (strcmp(kv->optionval, "histo") == 0) {
             fDetector->channelState = ChannelHistogram;
-
-            if (fDetector->asyncReady) {
-                fDetector->asyncReady = FALSE_;
-                status = psl__DetectorSignal(fDetector);
-                if (status != XIA_SUCCESS) {
-                    pslLog(PSL_LOG_ERROR, status,
-                           "Detector event signal error");
-                }
-
-                return status;
-            }
+            status = psl__DetectorAsyncSignal(fDetector);
         }
         else if (strcmp(kv->optionval, "listMode") == 0) {
             fDetector->channelState = ChannelListMode;
+            status = psl__DetectorAsyncSignal(fDetector);
         }
         else if (strcmp(kv->optionval, "calibrate") == 0) {
             /* special run should set it first for now */
@@ -7392,7 +8315,7 @@ PSL_STATIC int psl__UpdateChannelState(SiToro__Sinc__KeyValue* kv,
 
     }
 
-    return XIA_SUCCESS;
+    return status;
 }
 
 PSL_STATIC int psl__ReceiveSoftwareUpdateComplete(Module* module, SincBuffer* packet)
@@ -7421,7 +8344,7 @@ PSL_STATIC int psl__ReceiveCheckParamConsistency(Module* module, SincBuffer* pac
                                                      &resp,
                                                      &channel);
     if (status != true) {
-        status = falconXNSincErrorToHandel(&se);
+        status = falconXNSincErrorToHandelError(&se);
         psl__ModuleStatusResponse(module, status);
         pslLog(PSL_LOG_ERROR, status,
                "Decode from FalconXN connection failed: %s:%d",
@@ -7590,12 +8513,11 @@ PSL_STATIC void psl__ModuleReceiver(void* arg)
             break;
 
         if (status != true) {
-            int sincErrCode = SincReadErrorCode(&fModule->sinc);
+            SiToro__Sinc__ErrorCode sincErrCode = SincReadErrorCode(&fModule->sinc);
             if (sincErrCode == SI_TORO__SINC__ERROR_CODE__TIMEOUT)
                 continue;
 
-            status = falconXNSincResultToHandel(sincErrCode,
-                                                SincReadErrorMessage(&fModule->sinc));
+            status = falconXNSincToHandelError(&fModule->sinc);
             pslLog(PSL_LOG_ERROR, status,
                    "Read message failed for FalconXN connection: %s:%d",
                    fModule->hostAddress, fModule->portBase);
@@ -7726,8 +8648,7 @@ PSL_STATIC int psl__SetupModule(Module *module)
                          fModule->hostAddress,
                          fModule->portBase);
     if (status == false) {
-        status = falconXNSincResultToHandel(SincCurrentErrorCode(&fModule->sinc),
-                                            SincCurrentErrorMessage(&fModule->sinc));
+        status = falconXNSincToHandelError(&fModule->sinc);
         pslLog(PSL_LOG_ERROR, status,
                "Unable to open the FalconXN connection: %s:%d",
                fModule->hostAddress, fModule->portBase);
@@ -7737,8 +8658,7 @@ PSL_STATIC int psl__SetupModule(Module *module)
 
     status = SincPing(&fModule->sinc, 0);
     if (!status) {
-        status = falconXNSincResultToHandel(SincCurrentErrorCode(&fModule->sinc),
-                                            SincCurrentErrorMessage(&fModule->sinc));
+        status = falconXNSincToHandelError(&fModule->sinc);
         SincDisconnect(&fModule->sinc);
         pslLog(PSL_LOG_ERROR, status,
                "Detector ping failed: %s:%d",
@@ -8461,7 +9381,8 @@ PSL_STATIC int psl__WriteDetCharacterizationWave(xia_sio *dcFile,
         }
 
         if (i == len) {
-            written = xia_sio_printf(dcFile, "%s=%d,start=%f,incr=%f\n", name, len, start, incr);
+            written = xia_sio_printf(dcFile, "%s=%d,start=%f,incr=%f\n",
+                                     name, len, start, incr);
             if (written < 0) {
                 xia_sio_close(dcFile);
                 status = -written;
@@ -9020,7 +9941,8 @@ PSL_STATIC int psl__LoadDetCharacterization(FalconXNDetector *fDetector, Module 
                 fStatus = xiaModifyFirmwareItem(firmware, 0, "filename", "null");
 
                 if (fStatus != XIA_SUCCESS) {
-                    pslLog(PSL_LOG_ERROR, fStatus, "Clearing firmware %s filename", firmware);
+                    pslLog(PSL_LOG_ERROR, fStatus,
+                           "Clearing firmware %s filename", firmware);
                 }
             }
         }
@@ -9386,7 +10308,7 @@ PSL_STATIC int psl__BoardOp_Apply(int detChan, Detector* detector, Module* modul
 
     psl__ModuleTransactionEnd(module);
 
-    return status;;
+    return status;
 }
 
 PSL_STATIC int psl__BoardOp_BufferDone(int detChan, Detector* detector, Module* module,
@@ -9433,8 +10355,10 @@ PSL_STATIC int psl__BoardOp_GetBoardFeatures(int detChan, Detector* detector,
     UNUSED(name);
 
     *features = BOARD_SUPPORTS_NO_EXTRA_FEATURES;
-    if (fDetector->features.termination50ohm) *features |= 1L << BOARD_SUPPORTS_TERMINATAION_50OHM;
-    if (fDetector->features.attenuationGround) *features |= 1L << BOARD_SUPPORTS_ATTENUATION_GROUND;
+    if (fDetector->features.termination50ohm)
+        *features |= 1L << BOARD_SUPPORTS_TERMINATAION_50OHM;
+    if (fDetector->features.attenuationGround)
+        *features |= 1L << BOARD_SUPPORTS_ATTENUATION_GROUND;
 
     return XIA_SUCCESS;
 }

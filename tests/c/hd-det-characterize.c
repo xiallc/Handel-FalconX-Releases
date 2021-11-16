@@ -82,23 +82,35 @@ int main(int argc, char** argv)
     for (a = 1; a < argc; ++a) {
         if (argv[a][0] == '-') {
             switch (argv[a][1]) {
-            case 'f':
-                ++a;
-                if (a >= argc) {
-                    printf("error: no file provided\n");
-                    exit (1);
-                }
-                strncpy(ini, argv[a], sizeof(ini) / sizeof(ini[0]));
-                break;
+                case 'f':
+                    ++a;
+                    if (a >= argc) {
+                        fprintf(stderr, "error: no file provided\n");
+                        exit (1);
+                    }
+                    strncpy(ini, argv[a], sizeof(ini) / sizeof(ini[0]));
+                    break;
 
-            default:
-                printf("error: invalid option: %s\n", argv[a]);
-                usage(argv[0]);
-                exit(1);
+                case 'd':
+                    ++a;
+                    if (a >= argc) {
+                        fprintf(stderr,
+                                "error: -d requires the number of detector channels\n");
+                        exit (1);
+                    }
+                    sscanf(argv[a], "%d", &channels);
+                    break;
+
+                default:
+                    fprintf(stderr,
+                            "error: invalid option: %s\n", argv[a]);
+                    usage(argv[0]);
+                    exit(1);
             }
         }
         else {
-            printf("error: invalid option: %s\n", argv[a]);
+            fprintf(stderr,
+                    "error: invalid option: %s\n", argv[a]);
             usage(argv[0]);
             exit(1);
         }
@@ -121,17 +133,19 @@ int main(int argc, char** argv)
     status = xiaGetModuleItem("module1", "module_type", module_type);
     CHECK_ERROR(status);
 
-    status = xiaGetModuleItem("module1", "number_of_channels", &channels);
-    CHECK_ERROR(status);
+    if (channels == 0) {
+        status = xiaGetModuleItem("module1", "number_of_channels", &channels);
+        CHECK_ERROR(status);
+    }
 
     /* Get progress text size */
     printf("Get progress text size.\n");
     status = xiaGetSpecialRunData(0, "detc-progress-text-size", &text_size);
     CHECK_ERROR(status);
 
-    text = malloc(text_size);
+    text = malloc((size_t) text_size);
     if (!text) {
-        printf("No memory for progress text of length %d\n", text_size);
+        printf("No memory for progress text of length %d\n", (int) text_size);
         status = xiaExit();
         if (status != XIA_SUCCESS)
             printf("Handel exit failed, Status = %d\n", status);
@@ -270,12 +284,12 @@ static int SEC_SLEEP(float *time)
 #else
     unsigned long secs = (unsigned long) *time;
     struct timespec req = {
-                           .tv_sec = (time_t) secs,
-                           .tv_nsec = (time_t) ((*time - secs) * 1000000000.0f)
+        .tv_sec = (time_t) secs,
+        .tv_nsec = (time_t) ((*time - secs) * 1000000000.0f)
     };
     struct timespec rem = {
-                           .tv_sec = 0,
-                           .tv_nsec = 0
+        .tv_sec = 0,
+        .tv_nsec = 0
     };
     while (TRUE_) {
         if (nanosleep(&req, &rem) == 0)

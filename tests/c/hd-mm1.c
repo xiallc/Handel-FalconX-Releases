@@ -36,7 +36,7 @@
  */
 
 /*
- * Exercises the xMAP list-mode functionality by repeatedly reading
+ * Exercises the FalconX's histogram functionality by repeatedly reading
  * out the buffers as fast as possible.
  */
 
@@ -106,7 +106,7 @@ int main(int argc, char *argv[])
         'b'
     };
 
-    int det_channels = 4;
+    int det_channels = 0;
     int det;
     double mca_channels = -1.0;
 
@@ -295,11 +295,13 @@ int main(int argc, char *argv[])
         exit(1);
     }
 
-    status = xiaGetModuleItem("module1", "number_of_channels", &det_channels);
+    if (det_channels == 0) {
+        status = xiaGetModuleItem("module1", "number_of_channels", &det_channels);
 
-    if (status != XIA_SUCCESS) {
-        fprintf(stderr, "Unable to get the number of channels.\n");
-        exit(1);
+        if (status != XIA_SUCCESS) {
+            fprintf(stderr, "Unable to get the number of channels.\n");
+            exit(1);
+        }
     }
 
     /* Switch to the mode. */
@@ -734,8 +736,8 @@ static int SEC_SLEEP(double time)
         .tv_nsec = (time_t) ((time - secs) * 1000000000.0)
     };
     struct timespec rem = {
-        .tv_sec = 0,
-        .tv_nsec = 0
+      .tv_sec = 0,
+      .tv_nsec = 0
     };
     while (TRUE_) {
         if (nanosleep(&req, &rem) == 0)

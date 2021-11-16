@@ -6,7 +6,7 @@ version = YAML.load_file ARGV[0]
 
 # Embed the hg short rev in xia_version.h if releasing.
 if release
-    version['string'] = `hg par --template \"{node\|short}\"`
+    version['string'] = `git rev-parse --short HEAD`.strip
 end
 
 File.open(ARGV[1], 'w') do |f|

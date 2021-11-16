@@ -146,7 +146,7 @@ int main(int argc, char** argv)
     for (channel = 0; channel < channels; ++channel) {
         const acq_setting* channel_settings = settings;
         while (channel_settings->name) {
-            value = channel_settings->value;;
+            value = channel_settings->value;
             status = xiaSetAcquisitionValues(0,
                                              channel_settings->name,
                                              &value);

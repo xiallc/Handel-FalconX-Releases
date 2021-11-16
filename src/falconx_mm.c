@@ -79,7 +79,7 @@ size_t psl__MappingModeBuffers_Size(MM_Buffers* buffers)
     return buffers->buffer[0].size;
 }
 
-static boolean_t psl__MappingModeBuffers_Full(MM_Buffers* buffers, int buffer)
+PSL_STATIC boolean_t psl__MappingModeBuffers_Full(MM_Buffers* buffers, int buffer)
 {
     return
         (buffers->buffer[buffer].level > 0) &&
@@ -88,24 +88,44 @@ static boolean_t psl__MappingModeBuffers_Full(MM_Buffers* buffers, int buffer)
          psl__MappingModeBuffers_Stopped(buffers));
 }
 
+PSL_STATIC size_t psl__MappingModeBuffers_Level(MM_Buffers* buffers, int buffer)
+{
+    MM_Buffer* mmb = &buffers->buffer[buffer];
+    return mmb->level;
+}
+
+size_t psl__MappingModeBuffers_A_Level(MM_Buffers* buffers)
+{
+    return psl__MappingModeBuffers_Level(buffers,
+                                         psl__MappingModeBuffer_A());
+}
+
 boolean_t psl__MappingModeBuffers_A_Full(MM_Buffers* buffers)
 {
-    return psl__MappingModeBuffers_Full(buffers, 0);
+    return psl__MappingModeBuffers_Full(buffers,
+                                        psl__MappingModeBuffer_A());
 }
 
 boolean_t psl__MappingModeBuffers_A_Active(MM_Buffers* buffers)
 {
-    return buffers->active == 0;
+    return buffers->active == psl__MappingModeBuffer_A();
+}
+
+size_t psl__MappingModeBuffers_B_Level(MM_Buffers* buffers)
+{
+    return psl__MappingModeBuffers_Level(buffers,
+                                         psl__MappingModeBuffer_B());
 }
 
 boolean_t psl__MappingModeBuffers_B_Full(MM_Buffers* buffers)
 {
-    return psl__MappingModeBuffers_Full(buffers, 1);
+    return psl__MappingModeBuffers_Full(buffers,
+                                        psl__MappingModeBuffer_B());
 }
 
 boolean_t psl__MappingModeBuffers_B_Active(MM_Buffers* buffers)
 {
-    return buffers->active == 1;
+    return buffers->active == psl__MappingModeBuffer_B();
 }
 
 int psl__MappingModeBuffers_Next(MM_Buffers* buffers)
@@ -120,7 +140,7 @@ int psl__MappingModeBuffers_Active(MM_Buffers* buffers)
 
 char psl__MappingModeBuffers_Active_Label(MM_Buffers* buffers)
 {
-    return buffers->active == 0 ? 'A' : 'B';
+    return buffers->active == psl__MappingModeBuffer_A() ? 'A' : 'B';
 }
 
 char psl__MappingModeBuffers_Next_Label(MM_Buffers* buffers)
@@ -131,6 +151,12 @@ char psl__MappingModeBuffers_Next_Label(MM_Buffers* buffers)
 boolean_t psl__MappingModeBuffers_Next_Full(MM_Buffers* buffers)
 {
     int buffer = psl__MappingModeBuffers_Next(buffers);
+    return psl__MappingModeBuffers_Full(buffers, buffer);
+}
+
+boolean_t psl__MappingModeBuffers_Active_Full(MM_Buffers* buffers)
+{
+    int buffer = psl__MappingModeBuffers_Active(buffers);
     return psl__MappingModeBuffers_Full(buffers, buffer);
 }
 
@@ -154,6 +180,11 @@ PSL_STATIC void psl__MappingModeBuffers_Active_Set(MM_Buffers* buffers, int buff
 
 void psl__MappingModeBuffers_Toggle(MM_Buffers* buffers)
 {
+    /* The previous Active and new Next is cleared by buffer_done
+     * to ensure buffer_full_X reports false after buffer_done.
+     */
+    ASSERT(psl__MappingModeBuffers_Active_Done(buffers));
+
     int buffer = psl__MappingModeBuffers_Next(buffers);
     psl__MappingModeBuffers_Active_Set(buffers, buffer);
     psl__MappingModeBuffers_Active_Reset(buffers);
@@ -239,14 +270,8 @@ int psl__MappingModeBuffers_Active_Reset(MM_Buffers* buffers)
 }
 
 
-PSL_STATIC size_t psl__MappingModeBuffers_Level(MM_Buffers* buffers, int buffer)
-{
-    MM_Buffer* mmb = &buffers->buffer[buffer];
-    return mmb->level;
-}
-
-static void psl__MappingModeBuffers_SetLevel(MM_Buffers* buffers,
-                                             int buffer, size_t level)
+PSL_STATIC void psl__MappingModeBuffers_SetLevel(MM_Buffers* buffers,
+                                                 int buffer, size_t level)
 {
     MM_Buffer* mmb = &buffers->buffer[buffer];
     mmb->level = level;
@@ -300,7 +325,7 @@ size_t psl__MappingModeBuffers_Active_Remaining(MM_Buffers* buffers)
 {
     int buffer = psl__MappingModeBuffers_Active(buffers);
     MM_Buffer* mmb = &buffers->buffer[buffer];
-    return mmb->level - mmb->next;
+    return mmb->size - mmb->level;
 }
 
 PSL_STATIC uint32_t psl__MappingModeBuffers_Pixels(MM_Buffers* buffers, int buffer)
@@ -371,13 +396,14 @@ int psl__MappingModeBuffers_CopyIn(MM_Buffers* buffers, void* value, size_t size
 {
     int status = XIA_SUCCESS;
 
-    int buffer = psl__MappingModeBuffers_Next(buffers);
+    const int buffer = psl__MappingModeBuffers_Next(buffers);
 
     MM_Buffer* mmb = &buffers->buffer[buffer];
 
     pslLog(PSL_LOG_DEBUG,
-           "COPY-IN buffer:%c length:%d level:%d size:%d",
-           buffer == 0 ? 'A' : 'B', (int) size, (int) mmb->level, (int) mmb->size);
+           "COPY-IN buffer:%c length:%d level:%d size:%d remaining:%d",
+           buffer == 0 ? 'A' : 'B', (int) size,
+           (int) mmb->level, (int) mmb->size, (int) (mmb->size - mmb->level));
 
     if ((mmb->level + size) > mmb->size) {
         status = XIA_INVALID_VALUE;
@@ -400,7 +426,7 @@ int psl__MappingModeBuffers_CopyOut(MM_Buffers* buffers, void* value, size_t* si
 {
     int status = XIA_SUCCESS;
 
-    int buffer = psl__MappingModeBuffers_Active(buffers);
+    const int buffer = psl__MappingModeBuffers_Active(buffers);
 
     MM_Buffer* mmb = &buffers->buffer[buffer];
 
@@ -482,6 +508,11 @@ int psl__MappingModeBuffer_Open(MM_Buffer* buffer, size_t size)
                    "Error allocating memory for MM buffer");
             return status;
         }
+
+        pslLog(PSL_LOG_DEBUG,
+               "MMB Open: size:%zu (%zu) start:%p end: %p",
+               size, size * sizeof(uint32_t),
+               (void*) buffer->buffer, (void*) &buffer->buffer[size]);
 
         memset(buffer->buffer, 0, size * sizeof(uint32_t));
         buffer->full = FALSE_;
@@ -677,6 +708,8 @@ int psl__MappingModeControl_CloseAny(MM_Control* control)
         status = psl__MappingModeControl_CloseMM0(control);
     else if (psl__MappingModeControl_IsMode(control, MAPPING_MODE_MCA_FSM))
         status = psl__MappingModeControl_CloseMM1(control);
+    else if (psl__MappingModeControl_IsMode(control, MAPPING_MODE_LIST))
+        status = psl__MappingModeControl_CloseMM3(control);
     return status;
 }
 
@@ -868,6 +901,100 @@ size_t psl__MappingModeControl_MM1BufferSize(uint16_t number_mca_channels,
                   (number_mca_channels + XMAP_PIXEL_HEADER_SIZE_U32));
 }
 
+int psl__MappingModeControl_OpenMM3(MM_Control* control,
+                                    int         detChan,
+                                    uint32_t    run_number,
+                                    size_t      buffer_size)
+{
+    int status = XIA_SUCCESS;
+
+    MMC3_Data* mm3;
+
+    if (control->dataFormatter != NULL) {
+        status = XIA_ALREADY_OPEN;
+        pslLog(PSL_LOG_ERROR, status,
+               "Mapping mode control already open");
+        return status;
+    }
+
+    if (buffer_size == 0)
+        buffer_size = XMAP_LISTMODE_BUFFER;
+
+    pslLog(PSL_LOG_DEBUG,
+           "MM2 Open: run_number=%d buffer_size=%d",
+           (int) run_number, (int) buffer_size);
+
+    control->mode = MAPPING_MODE_NIL;
+
+    mm3 = handel_md_alloc(sizeof(MMC3_Data));
+
+    if (!mm3) {
+        status = XIA_NOMEM;
+        pslLog(PSL_LOG_ERROR, status,
+               "Error allocating memory for MMC3 data");
+        return status;
+    }
+
+    memset(mm3, 0, sizeof(MMC3_Data));
+
+    status = psl__MappingModeBuffers_Open(&mm3->buffers,
+                                          buffer_size,
+                                          0);
+    if (status != XIA_SUCCESS) {
+        handel_md_free(mm3);
+        return status;
+    }
+
+    mm3->detChan = detChan;
+    mm3->runNumber = run_number;
+    mm3->data_setId = 0;
+    mm3->buffer_size = buffer_size;
+
+    control->dataFormatter = mm3;
+    control->mode = MAPPING_MODE_LIST;
+
+    return status;
+}
+
+int psl__MappingModeControl_CloseMM3(MM_Control* control)
+{
+    int status = XIA_SUCCESS;
+
+    pslLog(PSL_LOG_DEBUG, "MM3 Close");
+
+    control->mode = MAPPING_MODE_NIL;
+
+    if (control->dataFormatter) {
+        MMC3_Data* mm3 = control->dataFormatter;
+        int        this_status;
+        this_status = psl__MappingModeBuffers_Close(&mm3->buffers);
+        if ((status == XIA_SUCCESS) && (this_status != XIA_SUCCESS))
+            status = this_status;
+        handel_md_free(control->dataFormatter);
+        control->dataFormatter = NULL;
+    }
+
+    return status;
+}
+
+MMC3_Data* psl__MappingModeControl_MM3Data(MM_Control* control)
+{
+    return control->dataFormatter;
+}
+
+size_t psl__MappingModeControl_MM3BufferSize(MM_Control* control)
+{
+    /*
+     * If the user seeing the size is supported we use the control.
+     */
+    size_t size = XMAP_LISTMODE_BUFFER;
+    if (control) {
+        MMC3_Data* mm3 = psl__MappingModeControl_MM3Data(control);
+        size = mm3->buffer_size;
+    }
+    return XMAP_BUFFER_HEADER_SIZE_U32 + size;
+}
+
 MM_Mode psl__MappingModeControl_Mode(MM_Control* control)
 {
     return control->mode;
@@ -890,15 +1017,6 @@ void psl__Write32(uint16_t* buffer, uint32_t value)
 }
 
 /*
- * Write a 64 bit (8 byte) double value into an uint16 buffer pointer
- * without any conversion.
- */
-void psl__WriteDbl(uint16_t* buffer, double value)
-{
-    memcpy(buffer, &value, FALCON_HEADER_DOUBLE_SIZE);
-}
-
-/*
  * Write a 64 bit (8 byte) uint value into an uint16 buffer pointer
  * without any conversion.
  */
@@ -907,14 +1025,23 @@ void psl__Write64(uint16_t* buffer, uint64_t value)
     memcpy(buffer, &value, sizeof(uint64_t));
 }
 
-int psl__XMAP_WriteBufferHeader_MM1(MMC1_Data* mm1)
+/*
+ * Write a 64 bit (8 byte) double value into an uint16 buffer pointer
+ * without any conversion.
+ */
+void psl__WriteDbl(uint16_t* buffer, double value)
+{
+    memcpy(buffer, &value, FALCON_HEADER_DOUBLE_SIZE);
+}
+
+PSL_STATIC int psl__XMAP_WriteBufferHeader(uint16_t* in,
+                                           uint32_t  bufferNumber,
+                                           int       bufferId,
+                                           uint32_t  runNumber,
+                                           uint32_t  startingPixel,
+                                           int       detChan)
 {
     int status = XIA_SUCCESS;
-
-    MM_Buffers* mmb = &mm1->buffers;
-
-    uint16_t* in = (uint16_t*) psl__MappingModeBuffers_Next_Data(mmb);
-
     int i;
 
     /*
@@ -933,33 +1060,49 @@ int psl__XMAP_WriteBufferHeader_MM1(MMC1_Data* mm1)
     in[3] = MAPPING_MODE_MCA_FSM;
 
     /* 4: run number, 16bits */
-    in[4] = (uint16_t) mm1->runNumber;
+    in[4] = (uint16_t) runNumber;
 
     /* 5,6: buffer number, 32bits */
-    psl__Write32(&in[5], mmb->bufferNumber);
+    psl__Write32(&in[5], bufferNumber);
 
     /* 7: buffer id, 16bits */
-    in[7] = (uint16_t) psl__MappingModeBuffers_Next(mmb);
+    in[7] = (uint16_t) bufferId;
 
     /* 8: number of pixels in the buffer, 16bits */
     in[8] = 0;
 
     /* 9,10: starting pixel, 32bits */
-    psl__Write32(&in[9], psl__MappingModeBuffers_Next_PixelTotal(mmb));
+    psl__Write32(&in[9], startingPixel);
 
     /* 11: module ID, 16bits */
     in[11] = 0;
 
     /* 12: detector channel, 16bits */
-    in[12] = (uint16_t) mm1->detChan;
+    in[12] = (uint16_t) detChan;
 
     /* Remainder of XMAP_BUFFER_HEADER_SIZE: set to 0 */
     for (i = 13; i < XMAP_BUFFER_HEADER_SIZE; ++i)
         in[i] = 0;
 
-    psl__MappingModeBuffers_Next_MoveLevel(mmb, XMAP_BUFFER_HEADER_SIZE_U32);
+    return status;
+}
 
-    mmb->bufferNumber++;
+int psl__XMAP_WriteBufferHeader_MM1(MMC1_Data* mm1)
+{
+    int status;
+
+    MM_Buffers* mmb = &mm1->buffers;
+
+    status = psl__XMAP_WriteBufferHeader((uint16_t*) psl__MappingModeBuffers_Next_Data(mmb),
+                                         mmb->bufferNumber,
+                                         psl__MappingModeBuffers_Next(mmb),
+                                         mm1->runNumber,
+                                         psl__MappingModeBuffers_Next_PixelTotal(mmb),
+                                         mm1->detChan);
+    if (status == XIA_SUCCESS) {
+        psl__MappingModeBuffers_Next_MoveLevel(mmb, XMAP_BUFFER_HEADER_SIZE_U32);
+        mmb->bufferNumber++;
+    }
 
     return status;
 }
@@ -1049,6 +1192,26 @@ int psl__XMAP_WritePixelHeader_MM1(MMC1_Data* mm1, MM_Pixel_Stats* stats)
         in[i] = 0;
 
     psl__MappingModeBuffers_Next_MoveLevel(mmb, XMAP_PIXEL_HEADER_SIZE_U32);
+
+    return status;
+}
+
+int psl__XMAP_WriteBufferHeader_MM3(MMC3_Data* mm3)
+{
+    int status;
+
+    MM_Buffers* mmb = &mm3->buffers;
+
+    status = psl__XMAP_WriteBufferHeader((uint16_t*) psl__MappingModeBuffers_Active_Data(mmb),
+                                         mmb->bufferNumber,
+                                         psl__MappingModeBuffers_Active(mmb),
+                                         0,
+                                         0,
+                                         mm3->detChan);
+    if (status == XIA_SUCCESS) {
+        psl__MappingModeBuffers_Active_MoveLevel(mmb, XMAP_BUFFER_HEADER_SIZE_U32);
+        mmb->bufferNumber++;
+    }
 
     return status;
 }

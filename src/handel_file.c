@@ -2080,7 +2080,7 @@ HANDEL_STATIC int xiaReadChanData(FILE *fp)
 
             handel_md_free(dataEnc);
 
-            uncmpLen = (uLong)dataDecLen * 32; /* Conservative estimate 32x deflate */
+            uncmpLen = (uLong)dataDecLen * 64; /* Conservative estimate 64x deflate */
             buf.data = handel_md_alloc(uncmpLen);
             if (buf.data == NULL) {
                 handel_md_free(dataDec);
@@ -2093,6 +2093,20 @@ HANDEL_STATIC int xiaReadChanData(FILE *fp)
             memset(buf.data, 0, uncmpLen);
 
             uncmpStatus = uncompress(buf.data, &uncmpLen, dataDec, (uLong)dataDecLen);
+
+            /* In the rare case where the deflate ratio is more than 64
+             * increase buffer size and try again*/
+            if (uncmpStatus == MZ_BUF_ERROR) {
+                xiaLog(XIA_LOG_WARNING, "_addData",
+                       "Inflated buffer size larger than %ul, trying again with %ul",
+                       uncmpLen, uncmpLen * 4);
+                uncmpLen = uncmpLen * 4;
+                handel_md_free(buf.data);
+                buf.data = handel_md_alloc(uncmpLen);
+                memset(buf.data, 0, uncmpLen);
+                uncmpStatus = uncompress(buf.data, &uncmpLen, dataDec, (uLong)dataDecLen);
+            }
+
             if (uncmpStatus != Z_OK) {
                 handel_md_free(dataDec);
                 handel_md_free(buf.data);

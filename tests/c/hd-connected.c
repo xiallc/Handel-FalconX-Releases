@@ -154,12 +154,12 @@ static int SEC_SLEEP(float *time)
     Sleep(wait);
 #else
     struct timespec req = {
-                           .tv_sec = (time_t) (unsigned long) *time,
-                           .tv_nsec = (time_t) ((*time) * 1000000000.0f)
+      .tv_sec = (time_t) (unsigned long) *time,
+      .tv_nsec = (time_t) ((*time - (unsigned long) *time) * 1000000000.0f)
     };
     struct timespec rem = {
-                           .tv_sec = 0,
-                           .tv_nsec = 0
+      .tv_sec = 0,
+      .tv_nsec = 0
     };
     while (TRUE_) {
         if (nanosleep(&req, &rem) == 0)
